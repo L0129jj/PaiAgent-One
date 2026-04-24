@@ -1,0 +1,117 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+
+.react-flow {
+  width: 100%;
+  height: 100vh;
+}
+
+.sidebar {
+  width: 250px;
+  background: white;
+  border-right: 1px solid #e2e8f0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+.node {
+  padding: 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 8px;
+  text-align: center;
+  transition: all 0.2s ease;
+}
+
+.node:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.debug-drawer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: white;
+  border-top: 1px solid #e2e8f0;
+  padding: 16px;
+  z-index: 1000;
+  box-shadow: 0 -2px 10px rgba(0,0,0,0.1);
+}
+
+.audio-player {
+  margin-top: 16px;
+  width: 100%;
+}
+
+/* 自定义节点样式 */
+.custom-node {
+  padding: 12px;
+  border-radius: 8px;
+  min-width: 120px;
+  text-align: center;
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.input-node {
+  background: #dbeafe;
+  border: 2px solid #3b82f6;
+}
+
+.model-node {
+  background: #d1fae5;
+  border: 2px solid #10b981;
+}
+
+.audio-node {
+  background: #f3e8ff;
+  border: 2px solid #8b5cf6;
+}
+
+.end-node {
+  background: #fee2e2;
+  border: 2px solid #ef4444;
+}
+
+.node-title {
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+
+.node-description {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.node-status-idle {
+  box-shadow: none;
+}
+
+.node-status-running {
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.35);
+  transform: translateY(-1px);
+}
+
+.node-status-success {
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.35);
+}
+
+.node-status-error {
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.35);
+}

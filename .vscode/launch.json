@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "java",
+      "name": "Run Backend (Spring Boot)",
+      "request": "launch",
+      "mainClass": "com.paiagent.Application",
+      "projectName": "paiagent-one"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Run Full Stack (Backend + Frontend)",
+      "configurations": ["Run Backend (Spring Boot)"],
+      "preLaunchTask": "Frontend: npm run dev"
+    }
+  ]
+}

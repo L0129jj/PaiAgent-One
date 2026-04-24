@@ -1,0 +1,11 @@
+com\paiagent\service\WorkflowService$WorkflowValidationResult.class
+com\paiagent\service\WorkflowService$Position.class
+com\paiagent\Application.class
+com\paiagent\service\WorkflowService$Edge.class
+com\paiagent\service\WorkflowService$WorkflowResult.class
+com\paiagent\service\AudioService.class
+com\paiagent\service\ModelService.class
+com\paiagent\service\WorkflowService.class
+com\paiagent\service\WorkflowService$Workflow.class
+com\paiagent\controller\WorkflowController.class
+com\paiagent\service\WorkflowService$Node.class

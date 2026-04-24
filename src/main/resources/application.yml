@@ -1,0 +1,49 @@
+spring:
+  application:
+    name: paiagent-one
+  datasource:
+    url: jdbc:h2:file:./data/paiagent;MODE=MySQL;AUTO_SERVER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  sql:
+    init:
+      mode: always
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+server:
+  port: 8080
+
+logging:
+  level:
+    root: info
+    com.paiagent: debug
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: auto
+
+# 大模型API配置
+model:
+  mock:
+    enabled: true
+  default-vendor: openai
+  openai:
+    api-key: ${OPENAI_API_KEY:mock-openai-key}
+  deepseek:
+    api-key: ${DEEPSEEK_API_KEY:mock-deepseek-key}
+  tongyi:
+    api-key: ${TONGYI_API_KEY:mock-tongyi-key}
+
+# 音频合成API配置
+audio:
+  api-key: ${AUDIO_API_KEY:mock-audio-key}
+  mock:
+    enabled: true
+    url: https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3

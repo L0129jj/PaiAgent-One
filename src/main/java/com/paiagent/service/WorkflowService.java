@@ -43,10 +43,11 @@ public class WorkflowService {
             WorkflowResult result = new WorkflowResult();
             result.setSuccess(true);
             result.setData(context);
-            result.setAudioUrl((String) context.get("audioUrl"));
+            String audioUrl = (String) context.getOrDefault("audioUrl", "");
+            result.setAudioUrl(audioUrl);
 
             emitEvent(eventConsumer, NodeExecutionEvent.completed("workflow", "workflow", "工作流执行完成", Map.of(
-                    "audioUrl", context.get("audioUrl")
+                    "audioUrl", audioUrl
             )));
 
             return result;

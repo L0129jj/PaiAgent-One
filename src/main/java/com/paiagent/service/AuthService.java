@@ -88,6 +88,14 @@ public class AuthService {
         return user;
     }
 
+    public void logout(String token) {
+        if (token == null || token.isBlank()) {
+            return;
+        }
+        userSessionMapper.delete(new LambdaQueryWrapper<UserSession>()
+                .eq(UserSession::getToken, token));
+    }
+
     private void validateCredentials(String username, String password) {
         if (username == null || username.isBlank()) {
             throw new IllegalArgumentException("用户名不能为空");

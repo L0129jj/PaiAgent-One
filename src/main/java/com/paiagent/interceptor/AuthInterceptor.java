@@ -37,7 +37,7 @@ public class AuthInterceptor implements HandlerInterceptor {
             request.setAttribute(AUTH_USER_ATTR, user);
             return true;
         } catch (Exception e) {
-            writeUnauthorized(response, e.getMessage());
+            writeUnauthorized(response, "登录已失效或无效");
             return false;
         }
     }

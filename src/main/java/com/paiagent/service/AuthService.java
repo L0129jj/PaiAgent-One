@@ -3,6 +3,7 @@ package com.paiagent.service;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.paiagent.entity.User;
 import com.paiagent.entity.UserSession;
+import com.paiagent.exception.UnauthorizedException;
 import com.paiagent.mapper.UserMapper;
 import com.paiagent.mapper.UserSessionMapper;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -47,7 +48,7 @@ public class AuthService {
         User user = userMapper.selectOne(new LambdaQueryWrapper<User>()
                 .eq(User::getUsername, username));
         if (user == null || !passwordEncoder.matches(password, user.getPasswordHash())) {
-            throw new IllegalArgumentException("用户名或密码错误");
+            throw new UnauthorizedException("用户名或密码错误");
         }
 
         String token = UUID.randomUUID().toString().replace("-", "");
@@ -67,7 +68,7 @@ public class AuthService {
 
     public User requireUserByToken(String token) {
         if (token == null || token.isBlank()) {
-            throw new IllegalArgumentException("缺少登录令牌");
+            throw new UnauthorizedException("缺少登录令牌");
         }
 
         UserSession session = userSessionMapper.selectOne(new LambdaQueryWrapper<UserSession>()
@@ -76,12 +77,12 @@ public class AuthService {
                 .last("LIMIT 1"));
 
         if (session == null) {
-            throw new IllegalArgumentException("登录状态已失效，请重新登录");
+            throw new UnauthorizedException("登录状态已失效，请重新登录");
         }
 
         User user = userMapper.selectById(session.getUserId());
         if (user == null) {
-            throw new IllegalArgumentException("用户不存在");
+            throw new UnauthorizedException("用户不存在");
         }
 
         return user;

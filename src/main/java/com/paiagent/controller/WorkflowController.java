@@ -1,6 +1,7 @@
 package com.paiagent.controller;
 
 import com.paiagent.entity.User;
+import com.paiagent.exception.UnauthorizedException;
 import com.paiagent.interceptor.AuthInterceptor;
 import com.paiagent.service.TextInputService;
 import com.paiagent.service.WorkflowService;
@@ -134,7 +135,7 @@ public class WorkflowController {
     private User getCurrentUser(HttpServletRequest servletRequest) {
         Object user = servletRequest.getAttribute(AuthInterceptor.AUTH_USER_ATTR);
         if (!(user instanceof User)) {
-            throw new IllegalArgumentException("登录状态已失效，请重新登录");
+            throw new UnauthorizedException("登录状态已失效，请重新登录");
         }
         return (User) user;
     }

@@ -29,6 +29,16 @@ mybatis-plus:
     db-config:
       id-type: auto
 
+auth:
+  token-header: X-Auth-Token
+  include-paths:
+    - /api/workflow/**
+    - /api/text-input/**
+  exclude-paths:
+    - /api/auth/**
+    - /api/workflow/test
+    - /h2-console/**
+
 # 大模型API配置
 model:
   mock:

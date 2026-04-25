@@ -12,10 +12,16 @@ public class WebMvcConfig implements WebMvcConfigurer {
     @Autowired
     private AuthInterceptor authInterceptor;
 
+    @Autowired
+    private AuthPathProperties authPathProperties;
+
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
+        String[] includePaths = authPathProperties.getIncludePaths().toArray(new String[0]);
+        String[] excludePaths = authPathProperties.getExcludePaths().toArray(new String[0]);
+
         registry.addInterceptor(authInterceptor)
-                .addPathPatterns("/api/workflow/**", "/api/text-input/**")
-                .excludePathPatterns("/api/auth/**", "/api/workflow/test");
+                .addPathPatterns(includePaths)
+                .excludePathPatterns(excludePaths);
     }
 }

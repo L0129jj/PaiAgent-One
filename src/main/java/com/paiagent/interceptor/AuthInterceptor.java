@@ -1,6 +1,7 @@
 package com.paiagent.interceptor;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.paiagent.config.AuthPathProperties;
 import com.paiagent.entity.User;
 import com.paiagent.service.AuthService;
 import jakarta.servlet.http.HttpServletRequest;
@@ -18,11 +19,14 @@ public class AuthInterceptor implements HandlerInterceptor {
     @Autowired
     private AuthService authService;
 
+    @Autowired
+    private AuthPathProperties authPathProperties;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
-        String token = request.getHeader("X-Auth-Token");
+        String token = request.getHeader(authPathProperties.getTokenHeader());
         if (token == null || token.isBlank()) {
             writeUnauthorized(response, "缺少登录令牌");
             return false;

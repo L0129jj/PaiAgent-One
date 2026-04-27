@@ -1,5 +1,9 @@
 package com.paiagent.service;
 
+import com.paiagent.graph.WorkflowGraphBuilder;
+import com.paiagent.graph.WorkflowState;
+import org.bsc.langgraph4j.CompiledGraph;
+import org.bsc.langgraph4j.NodeOutput;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -13,10 +17,7 @@ public class WorkflowService {
     private static final Logger logger = LoggerFactory.getLogger(WorkflowService.class);
 
     @Autowired
-    private ModelService modelService;
-
-    @Autowired
-    private AudioService audioService;
+    private WorkflowGraphBuilder graphBuilder;
 
     @Autowired
     private MinioService minioService;
@@ -26,40 +27,90 @@ public class WorkflowService {
         return executeWithEvents(workflow, inputData, null);
     }
 
-    // 执行工作流（带节点事件）
+    // 执行工作流（带节点事件）- 使用 LangGraph4j 驱动
     public WorkflowResult executeWithEvents(
             Workflow workflow,
             Map<String, Object> inputData,
             Consumer<NodeExecutionEvent> eventConsumer) {
         try {
-            // 1. 构建节点依赖图
-            Map<String, List<String>> dependencyGraph = buildDependencyGraph(workflow);
+            // 1. 构建 LangGraph4j 编译图
+            CompiledGraph<WorkflowState> compiledGraph = graphBuilder.buildDefaultGraph();
 
-            // 2. 拓扑排序
-            List<String> executionOrder = topologicalSort(dependencyGraph);
+            // 2. 构建初始状态，从前端工作流节点配置中提取参数
+            Map<String, Object> initialState = buildInitialState(workflow, inputData);
 
-            // 3. 执行节点
-            Map<String, Object> context = new HashMap<>(inputData == null ? Map.of() : inputData);
-            
-            // 为了支持前端引用，将输入数据中的 inputText 映射到变量系统
-            if (context.containsKey("inputText")) {
-                context.put("input.user_input", context.get("inputText"));
+            // 3. 使用 LangGraph4j stream() 驱动执行，逐节点发射 SSE 事件
+            emitEvent(eventConsumer, NodeExecutionEvent.started("workflow", "workflow", "工作流开始执行"));
+
+            WorkflowState finalState = null;
+
+            // LangGraph4j 流式执行：每个节点完成后产出一个 NodeOutput
+            for (NodeOutput<WorkflowState> nodeOutput : compiledGraph.stream(initialState)) {
+                String nodeName = nodeOutput.node();
+                WorkflowState state = nodeOutput.state();
+                finalState = state;
+
+                // 将 LangGraph4j 的节点输出转换为 SSE 事件
+                String nodeType = mapNodeNameToType(nodeName);
+                Map<String, Object> eventData = new HashMap<>();
+
+                switch (nodeType) {
+                    case "input":
+                        eventData.put("inputText", state.inputText());
+                        emitEvent(eventConsumer, NodeExecutionEvent.completed(
+                                nodeName, nodeType, "输入节点就绪", eventData));
+                        break;
+                    case "model":
+                        eventData.put("modelOutput", state.modelOutput());
+                        String error = state.error();
+                        if (error != null && !error.isBlank()) {
+                            emitEvent(eventConsumer, NodeExecutionEvent.failed(
+                                    nodeName, nodeType, "大模型节点执行失败", error));
+                        } else {
+                            emitEvent(eventConsumer, NodeExecutionEvent.completed(
+                                    nodeName, nodeType, "大模型节点执行完成", eventData));
+                        }
+                        break;
+                    case "audio":
+                        eventData.put("audioUrl", state.audioUrl());
+                        emitEvent(eventConsumer, NodeExecutionEvent.completed(
+                                nodeName, nodeType, "音频节点执行完成", eventData));
+                        break;
+                    default:
+                        emitEvent(eventConsumer, NodeExecutionEvent.completed(
+                                nodeName, nodeType, "节点执行完成", eventData));
+                        break;
+                }
             }
 
-            executeNodes(executionOrder, workflow, context, eventConsumer);
-
-            // 4. 返回结果
+            // 4. 构建并返回结果
             WorkflowResult result = new WorkflowResult();
             result.setSuccess(true);
-            result.setData(context);
-            String audioUrl = (String) context.getOrDefault("audioUrl", "");
-            result.setAudioUrl(audioUrl);
+            result.setData(finalState != null ? finalState.data() : Map.of());
+
+            String audioUrl = finalState != null ? finalState.audioUrl() : "";
+
+            // 如果模型输出是远程 URL，尝试转存到 MinIO
+            if (finalState != null) {
+                String modelOutput = finalState.modelOutput();
+                if (modelOutput != null && modelOutput.trim().startsWith("http") && !modelOutput.contains("mock")) {
+                    try {
+                        String minioUrl = minioService.uploadFromUrl(modelOutput.trim());
+                        result.getData().put("modelOutput", minioUrl);
+                    } catch (Exception e) {
+                        logger.warn("MinIO 转存失败，使用原始 URL", e);
+                    }
+                }
+            }
+
+            result.setAudioUrl(audioUrl != null ? audioUrl : "");
 
             emitEvent(eventConsumer, NodeExecutionEvent.completed("workflow", "workflow", "工作流执行完成", Map.of(
-                    "audioUrl", audioUrl
+                    "audioUrl", result.getAudioUrl()
             )));
 
             return result;
+
         } catch (Exception e) {
             logger.error("工作流执行失败", e);
             emitEvent(eventConsumer, NodeExecutionEvent.failed("workflow", "workflow", "工作流执行失败", e.getMessage()));
@@ -70,211 +121,70 @@ public class WorkflowService {
         }
     }
 
-    // 构建节点依赖图
-    private Map<String, List<String>> buildDependencyGraph(Workflow workflow) {
-        Map<String, List<String>> graph = new HashMap<>();
-        
-        // 初始化所有节点
-        for (Node node : workflow.getNodes()) {
-            graph.put(node.getId(), new ArrayList<>());
-        }
-        
-        // 添加依赖关系
-        for (Edge edge : workflow.getEdges()) {
-            List<String> dependencies = graph.get(edge.getTarget());
-            dependencies.add(edge.getSource());
-            graph.put(edge.getTarget(), dependencies);
-        }
-        
-        return graph;
-    }
+    /**
+     * 从前端工作流定义中提取节点配置，构建 LangGraph4j 初始状态
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> buildInitialState(Workflow workflow, Map<String, Object> inputData) {
+        Map<String, Object> state = new HashMap<>();
 
-    // 拓扑排序
-    private List<String> topologicalSort(Map<String, List<String>> graph) throws Exception {
-        Map<String, Integer> inDegree = new HashMap<>();
-        List<String> result = new ArrayList<>();
-        Queue<String> queue = new LinkedList<>();
-        
-        // 计算入度
-        for (Map.Entry<String, List<String>> entry : graph.entrySet()) {
-            inDegree.put(entry.getKey(), entry.getValue().size());
-            if (entry.getValue().size() == 0) {
-                queue.add(entry.getKey());
-            }
-        }
-        
-        // 执行拓扑排序
-        while (!queue.isEmpty()) {
-            String node = queue.poll();
-            result.add(node);
-            
-            // 更新依赖此节点的其他节点的入度
-            for (Map.Entry<String, List<String>> entry : graph.entrySet()) {
-                if (entry.getValue().contains(node)) {
-                    int newInDegree = inDegree.get(entry.getKey()) - 1;
-                    inDegree.put(entry.getKey(), newInDegree);
-                    if (newInDegree == 0) {
-                        queue.add(entry.getKey());
+        // 基础输入
+        state.put(WorkflowState.INPUT_TEXT, inputData != null ?
+                inputData.getOrDefault("inputText", "") : "");
+
+        // 从前端节点配置中提取参数
+        if (workflow != null && workflow.getNodes() != null) {
+            for (Node node : workflow.getNodes()) {
+                Map<String, Object> data = node.getData();
+                if (data == null) continue;
+                Map<String, Object> config = null;
+                if (data.get("config") instanceof Map) {
+                    config = (Map<String, Object>) data.get("config");
+                }
+                if (config == null) continue;
+
+                if ("model".equals(node.getType())) {
+                    // 提取大模型节点配置
+                    putIfPresent(state, WorkflowState.API_KEY, config.get("apiKey"));
+                    putIfPresent(state, WorkflowState.API_ENDPOINT, config.get("apiEndpoint"));
+                    putIfPresent(state, WorkflowState.MODEL_NAME, config.get("modelName"));
+                    putIfPresent(state, WorkflowState.SYSTEM_PROMPT, config.get("systemPrompt"));
+                    putIfPresent(state, WorkflowState.USER_PROMPT, config.get("userPrompt"));
+                    if (config.get("temperature") instanceof Number) {
+                        state.put(WorkflowState.TEMPERATURE, ((Number) config.get("temperature")).doubleValue());
+                    }
+
+                    // 处理输入引用
+                    String inputRef = (String) config.get("inputRef");
+                    if (inputRef != null && !inputRef.isBlank()) {
+                        state.put("input.user_input", state.getOrDefault(WorkflowState.INPUT_TEXT, ""));
                     }
                 }
-            }
-        }
-        
-        // 检查是否有环
-        if (result.size() != graph.size()) {
-            throw new Exception("工作流图中存在环，无法执行");
-        }
-        
-        return result;
-    }
 
-    // 执行节点
-    private void executeNodes(
-            List<String> executionOrder,
-            Workflow workflow,
-            Map<String, Object> context,
-            Consumer<NodeExecutionEvent> eventConsumer) throws Exception {
-        for (String nodeId : executionOrder) {
-            Node node = findNodeById(workflow.getNodes(), nodeId);
-            if (node == null) continue;
-
-            emitEvent(eventConsumer, NodeExecutionEvent.started(node.getId(), node.getType(), "节点开始执行"));
-            
-            switch (node.getType()) {
-                case "input":
-                    // 输入节点，已经在inputData中
-                    context.put("input.user_input", context.getOrDefault("inputText", ""));
-                    emitEvent(eventConsumer, NodeExecutionEvent.completed(node.getId(), node.getType(), "输入节点就绪", Map.of(
-                            "inputText", context.getOrDefault("inputText", "")
-                    )));
-                    break;
-                case "model":
-                    executeModelNode(node, context);
-                    emitEvent(eventConsumer, NodeExecutionEvent.completed(node.getId(), node.getType(), "大模型节点执行完成", Map.of(
-                            "modelOutput", context.getOrDefault("modelOutput", "")
-                    )));
-                    break;
-                case "audio":
-                    executeAudioNode(node, context, eventConsumer);
-                    emitEvent(eventConsumer, NodeExecutionEvent.completed(node.getId(), node.getType(), "音频节点执行完成", Map.of(
-                            "audioUrl", context.getOrDefault("audioUrl", "")
-                    )));
-                    break;
-                case "end":
-                    // 结束节点，不需要执行
-                    emitEvent(eventConsumer, NodeExecutionEvent.completed(node.getId(), node.getType(), "工作流结束", Map.of()));
-                    break;
-                default:
-                    emitEvent(eventConsumer, NodeExecutionEvent.failed(node.getId(), node.getType(), "未知节点类型", "未知节点类型: " + node.getType()));
-                    throw new Exception("未知节点类型: " + node.getType());
-            }
-        }
-    }
-
-    // 执行大模型节点
-    @SuppressWarnings("unchecked")
-    private void executeModelNode(Node node, Map<String, Object> context) throws Exception {
-        // 尝试从节点的 data.config 中提取前端配置的参数
-        Map<String, Object> data = node.getData();
-        Map<String, Object> config = null;
-        if (data != null && data.get("config") instanceof Map) {
-            config = (Map<String, Object>) data.get("config");
-        }
-
-        // 解析输入引用
-        String inputRef = config != null ? (String) config.get("inputRef") : null;
-        String resolvedInput = "";
-        if (inputRef != null && !inputRef.isBlank()) {
-            resolvedInput = (String) context.getOrDefault(inputRef, "");
-            if (resolvedInput == null || resolvedInput.isBlank()) {
-                if ("input.user_input".equals(inputRef)) {
-                    resolvedInput = (String) context.getOrDefault("inputText", "你好");
+                if ("audio".equals(node.getType())) {
+                    // 提取音频节点配置
+                    putIfPresent(state, WorkflowState.VOICE, config.get("voice"));
                 }
             }
-        } else {
-            resolvedInput = (String) context.getOrDefault("inputText", "你好");
         }
 
-        // 解析用户提示词模板
-        String userPromptTemplate = config != null ? (String) config.get("userPrompt") : null;
-        String prompt = resolvedInput;
-        if (userPromptTemplate != null && !userPromptTemplate.isBlank()) {
-            prompt = userPromptTemplate.replace("{{input}}", resolvedInput != null ? resolvedInput : "");
-        }
+        return state;
+    }
 
-        String apiKey = config != null ? (String) config.get("apiKey") : null;
-
-        if (apiKey != null && !apiKey.isBlank()) {
-            // 前端配置了 API Key，使用节点配置直接调用真实 API
-            String apiEndpoint = (String) config.get("apiEndpoint");
-            String modelName = (String) config.get("modelName");
-            String systemPrompt = (String) config.get("systemPrompt");
-            double temperature = 0.7;
-            Object tempObj = config.get("temperature");
-            if (tempObj instanceof Number) {
-                temperature = ((Number) tempObj).doubleValue();
-            }
-
-            logger.info("使用节点配置调用大模型: endpoint={}, model={}", apiEndpoint, modelName);
-            String result = modelService.callModelWithConfig(apiEndpoint, apiKey, modelName, temperature, systemPrompt, prompt);
-            
-            logger.info("模型节点执行结果: {}", result);
-            
-            // 如果结果是一个 URL，则尝试转存到 MinIO
-            if (result != null && result.trim().startsWith("http") && !result.contains("mock")) {
-                String trimmedResult = result.trim();
-                logger.info("检测到潜在的远程 URL，尝试转存到 MinIO: {}", trimmedResult);
-                result = minioService.uploadFromUrl(trimmedResult);
-            }
-            
-            context.put("modelOutput", result);
-            context.put("model.output", result); // 为引用系统保存
-        } else {
-            // 无节点配置，走默认逻辑（可能是 mock）
-            String result = modelService.callDefaultModel(prompt);
-            context.put("modelOutput", result);
-            context.put("model.output", result); // 为引用系统保存
+    private void putIfPresent(Map<String, Object> map, String key, Object value) {
+        if (value instanceof String && !((String) value).isBlank()) {
+            map.put(key, value);
         }
     }
 
-    // 执行音频合成节点
-    @SuppressWarnings("unchecked")
-    private void executeAudioNode(Node node, Map<String, Object> context, Consumer<NodeExecutionEvent> eventConsumer) throws Exception {
-        // 尝试从节点的 data.config 中提取前端配置的参数
-        Map<String, Object> data = node.getData();
-        Map<String, Object> config = new HashMap<>();
-        if (data != null && data.get("config") instanceof Map) {
-            config = (Map<String, Object>) data.get("config");
-        }
-
-        // 1. 解析输入文本 (text)
-        String textType = (String) config.getOrDefault("textType", "ref");
-        String textValue = (String) config.getOrDefault("textValue", "model.output");
-        String resolvedText = "";
-
-        if ("input".equals(textType)) {
-            resolvedText = textValue;
-        } else {
-            // 引用模式
-            resolvedText = (String) context.getOrDefault(textValue, "");
-            if (resolvedText == null || resolvedText.isBlank()) {
-                // 如果没有找到引用，回退到默认逻辑
-                resolvedText = (String) context.getOrDefault("modelOutput", context.getOrDefault("inputText", "你好"));
-            }
-        }
-
-        // 2. 获取其他参数
-        String apiKey = (String) config.get("apiKey");
-        String modelName = (String) config.get("modelName");
-        String voice = (String) config.getOrDefault("voice", "longxiaochun");
-        String languageType = (String) config.getOrDefault("languageType", "Auto");
-
-        // 3. 调用合成服务，传入进度回调
-        String audioUrl = audioService.synthesizeWithConfig(apiKey, modelName, voice, languageType, resolvedText, (progressMsg) -> {
-            emitEvent(eventConsumer, NodeExecutionEvent.progress(node.getId(), node.getType(), progressMsg));
-        });
-        context.put("audioUrl", audioUrl);
-        context.put("audio.url", audioUrl); // 为引用系统保存
+    private String mapNodeNameToType(String nodeName) {
+        // LangGraph4j 节点名即为类型名
+        return switch (nodeName) {
+            case "input" -> "input";
+            case "model" -> "model";
+            case "audio" -> "audio";
+            default -> nodeName;
+        };
     }
 
     private void emitEvent(Consumer<NodeExecutionEvent> eventConsumer, NodeExecutionEvent event) {
@@ -283,213 +193,99 @@ public class WorkflowService {
         }
     }
 
-    // 根据ID查找节点
-    private Node findNodeById(List<Node> nodes, String nodeId) {
-        for (Node node : nodes) {
-            if (node.getId().equals(nodeId)) {
-                return node;
-            }
-        }
-        return null;
-    }
-
     // 验证工作流
     public WorkflowValidationResult validateWorkflow(Workflow workflow) {
         WorkflowValidationResult result = new WorkflowValidationResult();
         List<String> errors = new ArrayList<>();
-        
-        // 检查是否有输入节点
-        boolean hasInputNode = workflow.getNodes().stream().anyMatch(node -> "input".equals(node.getType()));
-        if (!hasInputNode) {
-            errors.add("工作流必须包含至少一个输入节点");
+
+        if (workflow.getNodes() == null || workflow.getNodes().isEmpty()) {
+            errors.add("工作流节点不能为空");
+        } else {
+            boolean hasInputNode = workflow.getNodes().stream().anyMatch(node -> "input".equals(node.getType()));
+            if (!hasInputNode) {
+                errors.add("工作流必须包含至少一个输入节点");
+            }
+            boolean hasEndNode = workflow.getNodes().stream().anyMatch(node -> "end".equals(node.getType()));
+            if (!hasEndNode) {
+                errors.add("工作流必须包含至少一个结束节点");
+            }
         }
-        
-        // 检查是否有结束节点
-        boolean hasEndNode = workflow.getNodes().stream().anyMatch(node -> "end".equals(node.getType()));
-        if (!hasEndNode) {
-            errors.add("工作流必须包含至少一个结束节点");
-        }
-        
-        // 检查是否有环
+
+        // LangGraph4j 在 compile() 时会自动检测环和孤立节点
         try {
-            Map<String, List<String>> dependencyGraph = buildDependencyGraph(workflow);
-            topologicalSort(dependencyGraph);
+            graphBuilder.buildDefaultGraph();
         } catch (Exception e) {
-            errors.add("工作流图中存在环");
+            errors.add("工作流图结构异常: " + e.getMessage());
         }
-        
+
         result.setValid(errors.isEmpty());
         result.setErrors(errors);
         return result;
     }
 
-    // 工作流类
+    // ========== 内部数据类（保持不变，维持 API 兼容性） ==========
+
     public static class Workflow {
         private List<Node> nodes;
         private List<Edge> edges;
-
-        // getters and setters
-        public List<Node> getNodes() {
-            return nodes;
-        }
-
-        public void setNodes(List<Node> nodes) {
-            this.nodes = nodes;
-        }
-
-        public List<Edge> getEdges() {
-            return edges;
-        }
-
-        public void setEdges(List<Edge> edges) {
-            this.edges = edges;
-        }
+        public List<Node> getNodes() { return nodes; }
+        public void setNodes(List<Node> nodes) { this.nodes = nodes; }
+        public List<Edge> getEdges() { return edges; }
+        public void setEdges(List<Edge> edges) { this.edges = edges; }
     }
 
-    // 节点类
     public static class Node {
         private String id;
         private String type;
         private Map<String, Object> data;
         private Position position;
-
-        // getters and setters
-        public String getId() {
-            return id;
-        }
-
-        public void setId(String id) {
-            this.id = id;
-        }
-
-        public String getType() {
-            return type;
-        }
-
-        public void setType(String type) {
-            this.type = type;
-        }
-
-        public Map<String, Object> getData() {
-            return data;
-        }
-
-        public void setData(Map<String, Object> data) {
-            this.data = data;
-        }
-
-        public Position getPosition() {
-            return position;
-        }
-
-        public void setPosition(Position position) {
-            this.position = position;
-        }
+        public String getId() { return id; }
+        public void setId(String id) { this.id = id; }
+        public String getType() { return type; }
+        public void setType(String type) { this.type = type; }
+        public Map<String, Object> getData() { return data; }
+        public void setData(Map<String, Object> data) { this.data = data; }
+        public Position getPosition() { return position; }
+        public void setPosition(Position position) { this.position = position; }
     }
 
-    // 边类
     public static class Edge {
         private String id;
         private String source;
         private String target;
         private String label;
-
-        // getters and setters
-        public String getId() {
-            return id;
-        }
-
-        public void setId(String id) {
-            this.id = id;
-        }
-
-        public String getSource() {
-            return source;
-        }
-
-        public void setSource(String source) {
-            this.source = source;
-        }
-
-        public String getTarget() {
-            return target;
-        }
-
-        public void setTarget(String target) {
-            this.target = target;
-        }
-
-        public String getLabel() {
-            return label;
-        }
-
-        public void setLabel(String label) {
-            this.label = label;
-        }
+        public String getId() { return id; }
+        public void setId(String id) { this.id = id; }
+        public String getSource() { return source; }
+        public void setSource(String source) { this.source = source; }
+        public String getTarget() { return target; }
+        public void setTarget(String target) { this.target = target; }
+        public String getLabel() { return label; }
+        public void setLabel(String label) { this.label = label; }
     }
 
-    // 位置类
     public static class Position {
         private double x;
         private double y;
-
-        // getters and setters
-        public double getX() {
-            return x;
-        }
-
-        public void setX(double x) {
-            this.x = x;
-        }
-
-        public double getY() {
-            return y;
-        }
-
-        public void setY(double y) {
-            this.y = y;
-        }
+        public double getX() { return x; }
+        public void setX(double x) { this.x = x; }
+        public double getY() { return y; }
+        public void setY(double y) { this.y = y; }
     }
 
-    // 工作流执行结果类
     public static class WorkflowResult {
         private boolean success;
         private Map<String, Object> data;
         private String error;
         private String audioUrl;
-
-        // getters and setters
-        public boolean isSuccess() {
-            return success;
-        }
-
-        public void setSuccess(boolean success) {
-            this.success = success;
-        }
-
-        public Map<String, Object> getData() {
-            return data;
-        }
-
-        public void setData(Map<String, Object> data) {
-            this.data = data;
-        }
-
-        public String getError() {
-            return error;
-        }
-
-        public void setError(String error) {
-            this.error = error;
-        }
-
-        public String getAudioUrl() {
-            return audioUrl;
-        }
-
-        public void setAudioUrl(String audioUrl) {
-            this.audioUrl = audioUrl;
-        }
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+        public Map<String, Object> getData() { return data; }
+        public void setData(Map<String, Object> data) { this.data = data; }
+        public String getError() { return error; }
+        public void setError(String error) { this.error = error; }
+        public String getAudioUrl() { return audioUrl; }
+        public void setAudioUrl(String audioUrl) { this.audioUrl = audioUrl; }
     }
 
     public static class NodeExecutionEvent {
@@ -551,91 +347,31 @@ public class WorkflowService {
             return event;
         }
 
-        public String getEventType() {
-            return eventType;
-        }
-
-        public void setEventType(String eventType) {
-            this.eventType = eventType;
-        }
-
-        public String getNodeId() {
-            return nodeId;
-        }
-
-        public void setNodeId(String nodeId) {
-            this.nodeId = nodeId;
-        }
-
-        public String getNodeType() {
-            return nodeType;
-        }
-
-        public void setNodeType(String nodeType) {
-            this.nodeType = nodeType;
-        }
-
-        public String getMessage() {
-            return message;
-        }
-
-        public void setMessage(String message) {
-            this.message = message;
-        }
-
-        public boolean isSuccess() {
-            return success;
-        }
-
-        public void setSuccess(boolean success) {
-            this.success = success;
-        }
-
-        public String getError() {
-            return error;
-        }
-
-        public void setError(String error) {
-            this.error = error;
-        }
-
-        public Map<String, Object> getData() {
-            return data;
-        }
-
-        public void setData(Map<String, Object> data) {
-            this.data = data;
-        }
-
-        public long getTimestamp() {
-            return timestamp;
-        }
-
-        public void setTimestamp(long timestamp) {
-            this.timestamp = timestamp;
-        }
+        // Getters and setters
+        public String getEventType() { return eventType; }
+        public void setEventType(String eventType) { this.eventType = eventType; }
+        public String getNodeId() { return nodeId; }
+        public void setNodeId(String nodeId) { this.nodeId = nodeId; }
+        public String getNodeType() { return nodeType; }
+        public void setNodeType(String nodeType) { this.nodeType = nodeType; }
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+        public String getError() { return error; }
+        public void setError(String error) { this.error = error; }
+        public Map<String, Object> getData() { return data; }
+        public void setData(Map<String, Object> data) { this.data = data; }
+        public long getTimestamp() { return timestamp; }
+        public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
     }
 
-    // 工作流验证结果类
     public static class WorkflowValidationResult {
         private boolean valid;
         private List<String> errors;
-
-        // getters and setters
-        public boolean isValid() {
-            return valid;
-        }
-
-        public void setValid(boolean valid) {
-            this.valid = valid;
-        }
-
-        public List<String> getErrors() {
-            return errors;
-        }
-
-        public void setErrors(List<String> errors) {
-            this.errors = errors;
-        }
+        public boolean isValid() { return valid; }
+        public void setValid(boolean valid) { this.valid = valid; }
+        public List<String> getErrors() { return errors; }
+        public void setErrors(List<String> errors) { this.errors = errors; }
     }
 }

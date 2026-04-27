@@ -9,8 +9,10 @@ com\paiagent\config\MinioConfig.class
 com\paiagent\entity\UserSession.class
 com\paiagent\service\WorkflowService$Position.class
 com\paiagent\Application.class
+com\paiagent\graph\ModelNodeAction.class
 com\paiagent\mapper\UserMapper.class
 com\paiagent\exception\UnauthorizedException.class
+com\paiagent\graph\WorkflowGraphBuilder.class
 com\paiagent\interceptor\AuthInterceptor.class
 com\paiagent\service\WorkflowService$Edge.class
 com\paiagent\service\WorkflowService$WorkflowResult.class
@@ -23,10 +25,12 @@ com\paiagent\service\WorkflowService$NodeExecutionEvent.class
 com\paiagent\controller\WorkflowController$ExecuteWorkflowRequest.class
 com\paiagent\service\WorkflowService$Workflow.class
 com\paiagent\entity\TextInputRecord.class
+com\paiagent\graph\WorkflowState.class
 com\paiagent\controller\AuthController.class
 com\paiagent\MinioTestTool.class
 com\paiagent\config\AuthPathProperties.class
 com\paiagent\controller\WorkflowController.class
+com\paiagent\graph\AudioNodeAction.class
 com\paiagent\entity\User.class
 com\paiagent\mapper\UserSessionMapper.class
 com\paiagent\service\AuthService.class

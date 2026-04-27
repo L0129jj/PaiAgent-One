@@ -11,7 +11,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.2.0</version>
+        <version>3.4.1</version>
         <relativePath/>
     </parent>
 
@@ -20,7 +20,31 @@
         <maven.compiler.source>${java.version}</maven.compiler.source>
         <maven.compiler.target>${java.version}</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <spring-ai.version>1.0.0</spring-ai.version>
+        <langgraph4j.version>1.8.13</langgraph4j.version>
     </properties>
+
+    <!-- BOM 版本管理 -->
+    <dependencyManagement>
+        <dependencies>
+            <!-- Spring AI BOM -->
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- LangGraph4j BOM -->
+            <dependency>
+                <groupId>org.bsc.langgraph4j</groupId>
+                <artifactId>langgraph4j-bom</artifactId>
+                <version>${langgraph4j.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <!-- Spring Boot Web -->
@@ -42,6 +66,30 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
 
+        <!-- ========== Spring AI ========== -->
+        <!-- Spring AI OpenAI Starter (支持 OpenAI / DeepSeek / 任何 OpenAI 兼容 API) -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-openai</artifactId>
+            <version>${spring-ai.version}</version>
+        </dependency>
+
+        <!-- Spring AI Alibaba DashScope Starter (阿里云通义千问) -->
+        <dependency>
+            <groupId>com.alibaba.cloud.ai</groupId>
+            <artifactId>spring-ai-alibaba-starter-dashscope</artifactId>
+            <version>1.0.0.2</version>
+        </dependency>
+
+        <!-- ========== LangGraph4j ========== -->
+        <!-- LangGraph4j Core (状态图编排引擎) -->
+        <dependency>
+            <groupId>org.bsc.langgraph4j</groupId>
+            <artifactId>langgraph4j-core</artifactId>
+            <version>${langgraph4j.version}</version>
+        </dependency>
+
+        <!-- ========== 数据库与ORM ========== -->
         <!-- MyBatis-Plus -->
         <dependency>
             <groupId>com.baomidou</groupId>
@@ -56,6 +104,7 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- ========== 安全与工具 ========== -->
         <!-- Password Encoder -->
         <dependency>
             <groupId>org.springframework.security</groupId>
@@ -66,13 +115,6 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
-        </dependency>
-
-        <!-- HTTP Client -->
-        <dependency>
-            <groupId>org.apache.httpcomponents.client5</groupId>
-            <artifactId>httpclient5</artifactId>
-            <version>5.3</version>
         </dependency>
 
         <!-- Logging -->
@@ -87,12 +129,12 @@
             <artifactId>minio</artifactId>
             <version>8.5.7</version>
         </dependency>
-        <!-- DashScope SDK -->
+
+        <!-- DashScope SDK (仅用于 TTS 语音合成，Spring AI 不覆盖 TTS) -->
         <dependency>
             <groupId>com.alibaba</groupId>
             <artifactId>dashscope-sdk-java</artifactId>
             <version>2.20.6</version>
-            <!-- 排除旧的 okhttp，防止与 spring boot 冲突 -->
             <exclusions>
                 <exclusion>
                     <groupId>org.slf4j</groupId>
@@ -101,6 +143,20 @@
             </exclusions>
         </dependency>
     </dependencies>
+
+    <!-- 添加仓库：Spring AI 在阿里云镜像中不可用，需要从 Spring 官方或 Maven Central 拉取 -->
+    <repositories>
+        <repository>
+            <id>spring-release</id>
+            <name>Spring Release Repository</name>
+            <url>https://repo.spring.io/release</url>
+        </repository>
+        <repository>
+            <id>central</id>
+            <name>Maven Central</name>
+            <url>https://repo1.maven.org/maven2</url>
+        </repository>
+    </repositories>
 
     <build>
         <plugins>

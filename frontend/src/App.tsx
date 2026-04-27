@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import ReactFlow, { 
   addEdge, 
   useNodesState, 
@@ -37,6 +37,15 @@ type WorkflowNodeData = {
     apiKey?: string;
     temperature?: number;
     modelName?: string;
+    systemPrompt?: string;
+    userPrompt?: string;
+    inputRef?: string;
+    configSaved?: boolean;
+    // Audio Config
+    textType?: 'input' | 'ref';
+    textValue?: string;
+    voice?: string;
+    languageType?: string;
   };
 };
 
@@ -50,7 +59,24 @@ type StreamEventPayload = {
   success?: boolean;
   error?: string;
   data?: Record<string, unknown>;
+  durationMs?: number;
 };
+
+type LogEntry = {
+  time: string;
+  elapsed: number;
+  text: string;
+};
+
+type NodeDebugInfo = {
+  status: NodeStatus;
+  durationMs: number;
+  input: string;
+  output: string;
+  error: string;
+};
+
+const emptyNodeDebug = (): NodeDebugInfo => ({ status: 'idle', durationMs: 0, input: '', output: '', error: '' });
 
 type TextRecord = {
   id: number;
@@ -78,8 +104,8 @@ const InputNode = ({ data }: { data: WorkflowNodeData }) => {
   const status = data?.status ?? 'idle';
   return (
     <div className={`custom-node input-node ${getStatusClassName(status)}`}>
-      <div className="node-title">用户输入</div>
-      <div className="node-description">输入文本</div>
+      <div className="node-title">📥 输入</div>
+      <div className="node-description">用户输入文本</div>
       <Handle type="source" position={Position.Bottom} />
     </div>
   );
@@ -90,8 +116,8 @@ const ModelNode = ({ data }: { data: WorkflowNodeData }) => {
   return (
     <div className={`custom-node model-node ${getStatusClassName(status)}`}>
       <Handle type="target" position={Position.Top} />
-      <div className="node-title">{data.label || '大模型'}</div>
-      <div className="node-description">处理文本</div>
+      <div className="node-title">🧠 {data.label || '大模型'}</div>
+      <div className="node-description">AI 文本生成</div>
       <Handle type="source" position={Position.Bottom} />
     </div>
   );
@@ -102,8 +128,8 @@ const AudioNode = ({ data }: { data: WorkflowNodeData }) => {
   return (
     <div className={`custom-node audio-node ${getStatusClassName(status)}`}>
       <Handle type="target" position={Position.Top} />
-      <div className="node-title">音频合成</div>
-      <div className="node-description">生成音频</div>
+      <div className="node-title">🎙 {data.label || '超拟人音频合成'}</div>
+      <div className="node-description">语音合成</div>
       <Handle type="source" position={Position.Bottom} />
     </div>
   );
@@ -114,7 +140,7 @@ const EndNode = ({ data }: { data: WorkflowNodeData }) => {
   return (
     <div className={`custom-node end-node ${getStatusClassName(status)}`}>
       <Handle type="target" position={Position.Top} />
-      <div className="node-title">结束</div>
+      <div className="node-title">📤 输出</div>
     </div>
   );
 };
@@ -141,9 +167,12 @@ const initialNodes: WorkflowCanvasNode[] = [
       label: '通义千问', 
       status: 'idle',
       config: {
-        apiEndpoint: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation',
+        apiEndpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
         temperature: 0.7,
-        modelName: 'qwen-max'
+        modelName: 'qwen-plus',
+        systemPrompt: '你是一个有用的AI助手。',
+        userPrompt: `# 角色\n你是一位专业的广播节目编辑，负责制作一档名为“AI电台”的节目。你的任务是将用户提供的原始内容改编为适合单口相声播客节目的逐字稿。\n# 任务\n将原始内容分解为若干主题或问题，确保每段对话涵盖关键点，并自然过渡。\n# 注意点\n确保对话语言口语化、易懂。\n对于专业术语或复杂概念，使用简单明了的语言进行解释，使听众更易理解。\n保持对话节奏轻松、有趣，并加入适当的幽默和互动，以提高听众的参与感。\n注意：我会直接将你生成的内容朗读出来，不要输出口播稿以外的东西，不要带格式，\n# 示例 \n欢迎收听AI电台，今天咱们的节目一定让你们大开眼界！ \n没错！今天的主题绝对精彩，快搬小板凳听好哦！ \n那么，今天我们要讨论的内容是……\n# 原始内容：{{input}}`,
+        inputRef: 'input.user_input'
       }
     },
   },
@@ -151,14 +180,25 @@ const initialNodes: WorkflowCanvasNode[] = [
     id: '3',
     type: 'audio',
     position: { x: 250, y: 310 },
-    data: { label: '音频合成', status: 'idle' },
+    data: { 
+      label: '超拟人音频', 
+      status: 'idle',
+      config: {
+        apiKey: '',
+        modelName: 'cosyvoice-v1',
+        textType: 'ref',
+        textValue: 'model.output',
+        voice: 'longxiaochun',
+        languageType: 'Auto'
+      }
+    },
   },
   {
     id: '4',
     type: 'end',
     position: { x: 250, y: 440 },
     data: { 
-      label: '结束', 
+      label: '输出', 
       status: 'idle',
       config: {
         outputParams: [],
@@ -198,6 +238,7 @@ function App() {
   /* ---- sidebar state ---- */
   const [modelCategoryOpen, setModelCategoryOpen] = useState(true);
   const [toolCategoryOpen, setToolCategoryOpen] = useState(true);
+  const [workflowName, setWorkflowName] = useState('我的工作流');
 
   /* ---- canvas state ---- */
   const [nodes, setNodes, onNodesChange] = useNodesState<WorkflowNodeData>(initialNodes);
@@ -207,8 +248,25 @@ function App() {
   const [inputText, setInputText] = useState('');
   const [audioUrl, setAudioUrl] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [logs, setLogs] = useState<string[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [workflowStatus, setWorkflowStatus] = useState<NodeStatus>('idle');
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [_workflowStartTime, setWorkflowStartTime] = useState<number>(0);
+  const [modelNodeDebug, setModelNodeDebug] = useState<NodeDebugInfo>(emptyNodeDebug());
+  const [audioNodeDebug, setAudioNodeDebug] = useState<NodeDebugInfo>(emptyNodeDebug());
   const [recentInputs, setRecentInputs] = useState<TextRecord[]>([]);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastType, setToastType] = useState<'success' | 'error'>('success');
+  const [completedNodesCount, setCompletedNodesCount] = useState(0);
+
+  const logEndRef = useRef<HTMLDivElement>(null);
+
+  // 自动滚动日志到底部
+  useEffect(() => {
+    if (logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logs]);
 
   /* ---- helpers ---- */
   const clearAuthState = useCallback(() => {
@@ -321,7 +379,7 @@ function App() {
   }, [setNodes]);
 
   const addNode = useCallback((type: string, position: { x: number; y: number }, label?: string) => {
-    const defaultLabel = label || (type === 'model' ? '大模型' : type === 'input' ? '用户输入' : type === 'audio' ? '音频合成' : '结束');
+    const defaultLabel = label || (type === 'model' ? '大模型' : type === 'input' ? '用户输入' : type === 'audio' ? '超拟人音频' : '结束');
     const newNode: WorkflowCanvasNode = {
       id: Date.now().toString(),
       type,
@@ -330,9 +388,25 @@ function App() {
         label: defaultLabel, 
         status: 'idle',
         config: type === 'model' ? {
-          apiEndpoint: label === '通义千问' ? 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation' : '',
+          apiEndpoint: label === 'DeepSeek' ? 'https://api.deepseek.com/chat/completions' :
+                       label === '通义千问' ? 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions' :
+                       label === 'GPT-4' ? 'https://api.openai.com/v1/chat/completions' :
+                       label === '智谱' ? 'https://open.bigmodel.cn/api/paas/v4/chat/completions' : '',
           temperature: 0.7,
-          modelName: label === '通义千问' ? 'qwen-max' : ''
+          modelName: label === 'DeepSeek' ? 'deepseek-chat' :
+                     label === '通义千问' ? 'qwen-plus' :
+                     label === 'GPT-4' ? 'gpt-4-turbo' :
+                     label === '智谱' ? 'glm-4' : '',
+          systemPrompt: '你是一个有用的AI助手。',
+          userPrompt: `# 角色\n你是一位专业的广播节目编辑，负责制作一档名为“AI电台”的节目。你的任务是将用户提供的原始内容改编为适合单口相声播客节目的逐字稿。\n# 任务\n将原始内容分解为若干主题或问题，确保每段对话涵盖关键点，并自然过渡。\n# 注意点\n确保对话语言口语化、易懂。\n对于专业术语或复杂概念，使用简单明了的语言进行解释，使听众更易理解。\n保持对话节奏轻松、有趣，并加入适当的幽默和互动，以提高听众的参与感。\n注意：我会直接将你生成的内容朗读出来，不要输出口播稿以外的东西，不要带格式，\n# 示例 \n欢迎收听AI电台，今天咱们的节目一定让你们大开眼界！ \n没错！今天的主题绝对精彩，快搬小板凳听好哦！ \n那么，今天我们要讨论的内容是……\n# 原始内容：{{input}}`,
+          inputRef: 'input.user_input'
+        } : type === 'audio' ? {
+          apiKey: '',
+          modelName: 'cosyvoice-v1',
+          textType: 'ref',
+          textValue: 'model.output',
+          voice: 'longxiaochun',
+          languageType: 'Auto'
         } : {}
       }
     };
@@ -383,7 +457,13 @@ function App() {
   }, [setNodes]);
 
   const pushLog = useCallback((text: string) => {
-    setLogs((prev) => [...prev, text]);
+    const now = new Date();
+    const time = now.toLocaleTimeString('zh-CN', { hour12: false });
+    setWorkflowStartTime((st) => {
+      const elapsed = st > 0 ? now.getTime() - st : 0;
+      setLogs((prev) => [...prev, { time, elapsed, text }]);
+      return st;
+    });
   }, []);
 
   const loadRecentInputs = useCallback(async (authToken: string) => {
@@ -497,15 +577,40 @@ function App() {
         return;
       }
 
+      const nType = payload.nodeType ?? 'unknown';
+      const dur = payload.durationMs ?? 0;
+
       if (eventName === 'node_started' && payload.nodeId) {
         setNodeStatus(payload.nodeId, 'running');
-        pushLog(`开始: ${payload.nodeType ?? 'unknown'}(${payload.nodeId})`);
+        pushLog(`▶ 开始: ${nType}(${payload.nodeId})`);
+        // 实时更新节点调试卡片
+        if (nType === 'model') {
+          setModelNodeDebug(prev => ({ ...prev, status: 'running', input: (payload.data?.prompt as string) ?? '', error: '', output: '', durationMs: 0 }));
+        } else if (nType === 'audio') {
+          setAudioNodeDebug(prev => ({ ...prev, status: 'running', input: (payload.data?.text as string) ?? '', error: '', output: '', durationMs: 0 }));
+        }
+      } else if (eventName === 'node_progress' && payload.nodeId) {
+        // 收到进度更新
+        pushLog(`⏳ 进度: ${payload.message ?? '处理中...'}`);
       } else if (eventName === 'node_completed' && payload.nodeId) {
         setNodeStatus(payload.nodeId, 'success');
-        pushLog(`完成: ${payload.nodeType ?? 'unknown'}(${payload.nodeId}) - ${payload.message ?? ''}`);
+        setCompletedNodesCount((prev) => prev + 1); // 增加进度计数
+        pushLog(`✅ 完成: ${nType}(${payload.nodeId}) ${dur}ms`);
+        if (nType === 'model') {
+          setModelNodeDebug(prev => ({ ...prev, status: 'success', durationMs: dur, output: (payload.data?.modelOutput as string) ?? '' }));
+        } else if (nType === 'audio') {
+          setAudioNodeDebug(prev => ({ ...prev, status: 'success', durationMs: dur, output: (payload.data?.audioUrl as string) ?? '' }));
+        }
       } else if (eventName === 'node_failed' && payload.nodeId) {
         setNodeStatus(payload.nodeId, 'error');
-        pushLog(`失败: ${payload.nodeType ?? 'unknown'}(${payload.nodeId}) - ${payload.error ?? '未知错误'}`);
+        setCompletedNodesCount((prev) => prev + 1); // 失败也计入进度
+        const errMsg = payload.error ?? '未知错误';
+        pushLog(`❌ 失败: ${nType}(${payload.nodeId}) ${dur}ms - ${errMsg}`);
+        if (nType === 'model') {
+          setModelNodeDebug(prev => ({ ...prev, status: 'error', durationMs: dur, error: errMsg }));
+        } else if (nType === 'audio') {
+          setAudioNodeDebug(prev => ({ ...prev, status: 'error', durationMs: dur, error: errMsg }));
+        }
       } else if (eventName === 'workflow_result') {
         const nextAudioUrl = (payload as unknown as { audioUrl?: string; data?: Record<string, unknown> }).audioUrl
           ?? (payload.data?.audioUrl as string | undefined)
@@ -513,9 +618,11 @@ function App() {
         if (nextAudioUrl) {
           setAudioUrl(nextAudioUrl);
         }
-        pushLog('工作流执行完成。');
+        pushLog('🎉 工作流执行完成');
+        setWorkflowStatus('success');
       } else if (eventName === 'workflow_error') {
-        pushLog(`工作流失败: ${payload.error ?? '未知错误'}`);
+        pushLog(`🔴 工作流失败: ${payload.error ?? '未知错误'}`);
+        setWorkflowStatus('error');
       }
     });
   }, [pushLog, setNodeStatus]);
@@ -541,7 +648,12 @@ function App() {
       setIsLoading(true);
       setAudioUrl('');
       setLogs([]);
+      setWorkflowStatus('running');
+      setWorkflowStartTime(Date.now());
+      setModelNodeDebug(emptyNodeDebug());
+      setAudioNodeDebug(emptyNodeDebug());
       resetNodeStatus();
+      setCompletedNodesCount(0); // 重置已完成节点计数
 
       pushLog('开始执行工作流...');
 
@@ -593,6 +705,7 @@ function App() {
     } catch (error) {
       console.error('测试工作流时出错:', error);
       pushLog(`执行异常: ${error instanceof Error ? error.message : '未知错误'}`);
+      setWorkflowStatus('error');
       alert(`测试工作流时出错: ${error instanceof Error ? error.message : '未知错误'}`);
     } finally {
       setIsLoading(false);
@@ -651,6 +764,15 @@ function App() {
     }));
   }, [setNodes]);
 
+  const deleteNode = useCallback((nodeId: string) => {
+    setNodes((nds) => nds.filter((node) => node.id !== nodeId));
+    setEdges((eds) => eds.filter((edge) => edge.source !== nodeId && edge.target !== nodeId));
+    if (selectedNode?.id === nodeId) {
+      setSelectedNode(null);
+    }
+  }, [setNodes, setEdges, selectedNode]);
+
+
   /* ---- render: auth checking splash ---- */
   if (authChecking) {
     return (
@@ -676,436 +798,538 @@ function App() {
 
   /* ---- render: main app ---- */
   return (
-    <div className="flex h-screen bg-gray-50 text-gray-900">
-      {/* 左侧菜单 */}
-      <div className="sidebar bg-white border-r border-gray-200 shadow-sm flex flex-col w-64 shrink-0 overflow-hidden">
-        <div className="p-4 border-b border-gray-100 bg-gray-50/50">
-          <h1 className="text-xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">AI Agent 工作流</h1>
-          <p className="text-[10px] text-gray-400 mt-0.5 tracking-widest uppercase">Visual Workflow Designer</p>
+    <div className="app-shell">
+      {/* ===== 顶部导航栏 ===== */}
+      <header className="app-topbar">
+        <div className="topbar-left">
+          <span className="topbar-brand">PaiAgent</span>
+          <input
+            className="topbar-wf-name"
+            value={workflowName}
+            onChange={(e) => setWorkflowName(e.target.value)}
+            placeholder="工作流名称"
+          />
         </div>
-        
-        <div className="flex-1 overflow-y-auto custom-scrollbar">
-          {/* 大模型节点 */}
-          <div className="border-b border-gray-50">
-            <button 
-              onClick={() => setModelCategoryOpen(!modelCategoryOpen)}
-              className="w-full p-4 flex items-center justify-between hover:bg-gray-50 transition-colors group"
-            >
-              <div className="flex items-center">
-                <div className="w-8 h-8 rounded-lg bg-green-50 text-green-600 flex items-center justify-center mr-3 group-hover:scale-110 transition-transform">
-                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                  </svg>
-                </div>
-                <h2 className="text-sm font-bold text-gray-700">大模型节点</h2>
-              </div>
-              <svg className={`w-4 h-4 text-gray-400 transition-transform duration-300 ${modelCategoryOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-              </svg>
+        <div className="topbar-center">
+          <button className="btn btn-sm" onClick={() => { setNodes(initialNodes); setEdges(initialEdges); resetNodeStatus(); setLogs([]); setAudioUrl(''); }}>
+            + 新建
+          </button>
+          <button className="btn btn-primary btn-sm" onClick={() => { setToastType('success'); setToastMessage('工作流已保存'); setTimeout(() => setToastMessage(null), 2000); }}>
+            📋 保存
+          </button>
+          <button className="btn btn-accent btn-sm" onClick={() => setDebugOpen(true)}>
+            ⚙ 调试
+          </button>
+        </div>
+        <div className="topbar-right">
+          <div className="topbar-user">
+            <div className="topbar-user-icon">{currentUser.charAt(0).toUpperCase()}</div>
+            {currentUser}
+          </div>
+          <button className="btn btn-ghost btn-sm" onClick={async () => await logout()}>登出</button>
+        </div>
+      </header>
+
+      {/* ===== 主体三栏 ===== */}
+      <div className="app-body">
+        {/* ---- 左侧节点库 ---- */}
+        <aside className="node-library">
+          <div className="node-library-header">节点库</div>
+          <div className="node-library-body custom-scrollbar">
+            {/* 大模型节点 */}
+            <button className="node-category-toggle" onClick={() => setModelCategoryOpen(!modelCategoryOpen)}>
+              <span>🧠</span> 大模型节点
+              <svg className={`chevron ${modelCategoryOpen ? 'open' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
             </button>
-            
-            <div className={`overflow-hidden transition-all duration-300 ease-in-out ${modelCategoryOpen ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'}`}>
-              <div className="px-4 pb-4 space-y-2">
-                {[
-                  { id: 'qwen', label: '通义千问', color: 'bg-green-50 text-green-700 border-green-200' },
-                  { id: 'gpt4', label: 'GPT-4', color: 'bg-blue-50 text-blue-700 border-blue-200' },
-                  { id: 'deepseek', label: 'DeepSeek', color: 'bg-cyan-50 text-cyan-700 border-cyan-200' },
-                  { id: 'claude', label: 'Claude 3', color: 'bg-orange-50 text-orange-700 border-orange-200' }
-                ].map(m => (
-                  <div 
-                    key={m.id}
-                    className={`p-2.5 rounded-lg border text-xs font-medium cursor-pointer transition-all hover:shadow-md hover:-translate-y-0.5 active:scale-95 ${m.color}`}
-                    onClick={() => addNode('model', { x: 100, y: 100 }, m.label)}
-                  >
-                    {m.label}
-                  </div>
-                ))}
+            <div className={`node-category-items ${modelCategoryOpen ? 'expanded' : 'collapsed'}`}>
+              {[
+                { id: 'deepseek', label: 'DeepSeek', icon: '🔵', bg: '#eff6ff' },
+                { id: 'qwen', label: '通义千问', icon: '✨', bg: '#ecfdf5' },
+                { id: 'gpt4', label: 'GPT-4', icon: '🟢', bg: '#f0fdf4' },
+                { id: 'zhipu', label: '智谱', icon: '🌐', bg: '#faf5ff' },
+              ].map(m => (
+                <div key={m.id} className="node-lib-item" onClick={() => addNode('model', { x: 200 + Math.random()*100, y: 100 + Math.random()*200 }, m.label)}>
+                  <div className="node-lib-icon" style={{ background: m.bg }}>{m.icon}</div>
+                  {m.label}
+                </div>
+              ))}
+            </div>
+
+            {/* 工具节点 */}
+            <button className="node-category-toggle" onClick={() => setToolCategoryOpen(!toolCategoryOpen)} style={{ marginTop: 8 }}>
+              <span>🛠</span> 工具节点
+              <svg className={`chevron ${toolCategoryOpen ? 'open' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+            </button>
+            <div className={`node-category-items ${toolCategoryOpen ? 'expanded' : 'collapsed'}`}>
+              <div className="node-lib-item" onClick={() => addNode('audio', { x: 200 + Math.random()*100, y: 250 + Math.random()*100 })}>
+                <div className="node-lib-icon" style={{ background: '#faf5ff' }}>🎙</div>
+                超拟人音频合成
               </div>
             </div>
           </div>
-          
-          {/* 工具节点 */}
-          <div>
-            <button 
-              onClick={() => setToolCategoryOpen(!toolCategoryOpen)}
-              className="w-full p-4 flex items-center justify-between hover:bg-gray-50 transition-colors group"
-            >
-              <div className="flex items-center">
-                <div className="w-8 h-8 rounded-lg bg-purple-50 text-purple-600 flex items-center justify-center mr-3 group-hover:scale-110 transition-transform">
-                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 4a2 2 0 114 0v1a2 2 0 11-4 0V4zM18 8a2 2 0 114 0v1a2 2 0 11-4 0V8zM1 8a2 2 0 114 0v1a2 2 0 11-4 0V8zM11 12a2 2 0 114 0v1a2 2 0 11-4 0v-1zM18 16a2 2 0 114 0v1a2 2 0 11-4 0v-1zM1 16a2 2 0 114 0v1a2 2 0 11-4 0v-1z" />
-                  </svg>
-                </div>
-                <h2 className="text-sm font-bold text-gray-700">工具节点</h2>
-              </div>
-              <svg className={`w-4 h-4 text-gray-400 transition-transform duration-300 ${toolCategoryOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-              </svg>
-            </button>
-            
-            <div className={`overflow-hidden transition-all duration-300 ease-in-out ${toolCategoryOpen ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'}`}>
-              <div className="px-4 pb-4 space-y-2">
-                {[
-                  { id: 'input', label: '用户输入', color: 'bg-blue-50 text-blue-700 border-blue-200' },
-                  { id: 'audio', label: '音频合成', color: 'bg-purple-50 text-purple-700 border-purple-200' },
-                  { id: 'end', label: '结束', color: 'bg-red-50 text-red-700 border-red-200' }
-                ].map(t => (
-                  <div 
-                    key={t.id}
-                    className={`p-2.5 rounded-lg border text-xs font-medium cursor-pointer transition-all hover:shadow-md hover:-translate-y-0.5 active:scale-95 ${t.color}`}
-                    onClick={() => addNode(t.id, { x: 100, y: 100 })}
-                  >
-                    {t.label}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+          <div className="node-library-hint">💡 点击节点添加到画布</div>
+        </aside>
 
-      {/* 画板区域 */}
-      <div className="flex-1 relative">
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onConnect={onConnect}
-          onNodeClick={onNodeClick}
-          onPaneClick={onPaneClick}
-          nodeTypes={nodeTypes}
-        >
-          <Controls />
-          <Background />
-          <MiniMap />
-        </ReactFlow>
+        {/* ---- 中间画布 ---- */}
+        <main className="canvas-area">
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            onNodeClick={onNodeClick}
+            onPaneClick={onPaneClick}
+            nodeTypes={nodeTypes}
+          >
+            <Controls />
+            <Background />
+            <MiniMap />
+          </ReactFlow>
+        </main>
 
-        {/* 节点配置面板 */}
-        {selectedNode && (
-          <div className="absolute top-4 right-4 w-96 bg-white border border-gray-200 rounded-lg shadow-xl z-10 overflow-hidden flex flex-col max-h-[calc(100%-2rem)]">
-            <div className="p-4 border-b border-gray-100 bg-gray-50 flex justify-between items-center shrink-0">
-              <h3 className="font-bold text-gray-800">
-                节点配置 - {selectedNode.type === 'input' ? '输入' : selectedNode.type === 'end' ? '输出' : '常规'}
-              </h3>
-              <button onClick={() => setSelectedNode(null)} className="text-gray-400 hover:text-gray-600">
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
+        {/* ---- 右侧配置面板 ---- */}
+        <aside className="config-panel">
+          <div className="config-panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>节点配置</span>
+            {selectedNode && (
+              <button 
+                className="btn btn-sm" 
+                style={{ color: '#ef4444', borderColor: '#fca5a5', background: '#fef2f2', padding: '4px 8px', fontSize: 11 }} 
+                onClick={() => deleteNode(selectedNode.id)}
+              >
+                删除节点
               </button>
-            </div>
-            
-            <div className="p-4 space-y-6 overflow-y-auto">
-              {selectedNode.type === 'input' ? (
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">变量名</label>
-                    <div className="p-2 bg-blue-50 border border-blue-100 rounded text-sm text-blue-700 font-mono">user_input</div>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">变量类型</label>
-                    <div className="p-2 bg-gray-50 border border-gray-100 rounded text-sm text-gray-700">String</div>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">描述</label>
-                    <p className="text-sm text-gray-600 leading-relaxed">用户本轮的输入内容</p>
-                  </div>
-                  <div className="flex items-center">
-                    <input type="checkbox" checked readOnly className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded cursor-default" />
-                    <label className="ml-2 block text-sm font-medium text-gray-700">必要</label>
-                  </div>
+            )}
+          </div>
+          <div className="config-panel-body custom-scrollbar">
+            {selectedNode ? (
+              <>
+                {/* 通用信息 */}
+                <div className="config-section">
+                  <span className="config-label">节点 ID</span>
+                  <div className="config-value" style={{ fontFamily: 'monospace', fontSize: 12 }}>{selectedNode.id}</div>
                 </div>
-              ) : selectedNode.type === 'model' ? (
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">模型的接口地址</label>
-                    <input 
-                      className="w-full p-2 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none"
-                      value={nodes.find(n => n.id === selectedNode.id)?.data.config?.apiEndpoint ?? ''}
-                      onChange={(e) => updateNodeConfig(selectedNode.id, { apiEndpoint: e.target.value })}
-                      placeholder="https://..."
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">API 密钥</label>
-                    <input 
-                      type="password"
-                      className="w-full p-2 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none"
-                      value={nodes.find(n => n.id === selectedNode.id)?.data.config?.apiKey ?? ''}
-                      onChange={(e) => updateNodeConfig(selectedNode.id, { apiKey: e.target.value })}
-                      placeholder="sk-..."
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">温度 (Temperature)</label>
-                    <div className="flex items-center gap-3">
-                      <input 
-                        type="range"
-                        min="0"
-                        max="2"
-                        step="0.1"
-                        className="flex-1"
-                        value={nodes.find(n => n.id === selectedNode.id)?.data.config?.temperature ?? 0.7}
-                        onChange={(e) => updateNodeConfig(selectedNode.id, { temperature: parseFloat(e.target.value) })}
-                      />
-                      <span className="text-xs font-mono w-8">{nodes.find(n => n.id === selectedNode.id)?.data.config?.temperature ?? 0.7}</span>
+                <div className="config-section">
+                  <span className="config-label">节点类型</span>
+                  <div className="config-value">{selectedNode.type}</div>
+                </div>
+                <div className="config-divider" />
+
+                {/* ==== 输入节点 ==== */}
+                {selectedNode.type === 'input' && (
+                  <>
+                    <div className="config-section">
+                      <span className="config-label">变量名</span>
+                      <div className="config-value" style={{ color: '#2563eb', background: '#eff6ff' }}>user_input</div>
                     </div>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">模型名 (Model)</label>
-                    <input 
-                      className="w-full p-2 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none"
-                      value={nodes.find(n => n.id === selectedNode.id)?.data.config?.modelName ?? ''}
-                      onChange={(e) => updateNodeConfig(selectedNode.id, { modelName: e.target.value })}
-                      placeholder="e.g. qwen-max"
-                    />
-                  </div>
-                </div>
-              ) : selectedNode.type === 'end' ? (
-                <>
-                  {/* 输出配置 */}
-                  <div>
-                    <div className="flex justify-between items-center mb-3">
-                      <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider">输出配置</label>
-                      <button 
-                        onClick={() => addOutputParam(selectedNode.id)}
-                        className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors flex items-center"
-                      >
-                        <svg className="w-3 h-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                        </svg>
-                        添加
-                      </button>
+                    <div className="config-section">
+                      <span className="config-label">变量类型</span>
+                      <div className="config-value">String</div>
+                    </div>
+                    <div className="config-section">
+                      <span className="config-label">描述</span>
+                      <p style={{ fontSize: 13, color: '#6b7280', margin: 0 }}>用户本轮的输入内容</p>
+                    </div>
+                  </>
+                )}
+
+                {/* ==== 模型节点 ==== */}
+                {selectedNode.type === 'model' && (() => {
+                  const currentLabel = nodes.find(n => n.id === selectedNode.id)?.data.label;
+                  let endpointPlaceholder = "https://api.example.com/v1/chat/completions";
+                  let modelPlaceholder = "model-name";
+                  if (currentLabel === 'DeepSeek') {
+                    endpointPlaceholder = "https://api.deepseek.com/chat/completions";
+                    modelPlaceholder = "deepseek-chat";
+                  } else if (currentLabel === '通义千问') {
+                    endpointPlaceholder = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
+                    modelPlaceholder = "qwen-plus";
+                  } else if (currentLabel === 'GPT-4') {
+                    endpointPlaceholder = "https://api.openai.com/v1/chat/completions";
+                    modelPlaceholder = "gpt-4-turbo";
+                  } else if (currentLabel === '智谱') {
+                    endpointPlaceholder = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+                    modelPlaceholder = "glm-4";
+                  }
+
+                  return (
+                  <>
+                    <div className="config-section">
+                      <span className="config-label"><span style={{ color: '#ef4444' }}>*</span> 接口地址</span>
+                      <input className="config-input" value={nodes.find(n => n.id === selectedNode.id)?.data.config?.apiEndpoint ?? ''} onChange={(e) => updateNodeConfig(selectedNode.id, { apiEndpoint: e.target.value, configSaved: false })} placeholder={endpointPlaceholder} />
+                    </div>
+                    <div className="config-section">
+                      <span className="config-label"><span style={{ color: '#ef4444' }}>*</span> API 密钥</span>
+                      <input type="password" className="config-input" value={nodes.find(n => n.id === selectedNode.id)?.data.config?.apiKey ?? ''} onChange={(e) => updateNodeConfig(selectedNode.id, { apiKey: e.target.value, configSaved: false })} placeholder="sk-..." />
+                    </div>
+                    <div className="config-section">
+                      <span className="config-label"><span style={{ color: '#ef4444' }}>*</span> 模型名</span>
+                      <input className="config-input" value={nodes.find(n => n.id === selectedNode.id)?.data.config?.modelName ?? ''} onChange={(e) => updateNodeConfig(selectedNode.id, { modelName: e.target.value, configSaved: false })} placeholder={modelPlaceholder} />
+                    </div>
+                    <div className="config-section">
+                      <span className="config-label">温度 ({nodes.find(n => n.id === selectedNode.id)?.data.config?.temperature ?? 0.7})</span>
+                      <input type="range" min="0" max="2" step="0.1" style={{ width: '100%', accentColor: '#3b82f6' }} value={nodes.find(n => n.id === selectedNode.id)?.data.config?.temperature ?? 0.7} onChange={(e) => updateNodeConfig(selectedNode.id, { temperature: parseFloat(e.target.value), configSaved: false })} />
                     </div>
                     
-                    <div className="space-y-3">
+                    <div className="config-divider" />
+                    <div style={{ marginBottom: 12, fontWeight: 700, fontSize: 13, color: '#374151' }}>提示词配置</div>
+                    <div className="config-section">
+                      <span className="config-label">输入参数引用 ({"{{input}}"})</span>
+                      <select className="config-select" value={nodes.find(n => n.id === selectedNode.id)?.data.config?.inputRef ?? ''} onChange={(e) => updateNodeConfig(selectedNode.id, { inputRef: e.target.value, configSaved: false })}>
+                        <option value="">请选择引用来源...</option>
+                        <option value="input.user_input">用户输入.user_input</option>
+                      </select>
+                    </div>
+                    <div className="config-section">
+                      <span className="config-label">系统提示词</span>
+                      <textarea className="config-textarea" rows={3} value={nodes.find(n => n.id === selectedNode.id)?.data.config?.systemPrompt ?? ''} onChange={(e) => updateNodeConfig(selectedNode.id, { systemPrompt: e.target.value, configSaved: false })} placeholder="你是一个有用的AI助手。" />
+                    </div>
+                    <div className="config-section">
+                      <span className="config-label">用户提示词</span>
+                      <textarea className="config-textarea" rows={6} value={nodes.find(n => n.id === selectedNode.id)?.data.config?.userPrompt ?? ''} onChange={(e) => updateNodeConfig(selectedNode.id, { userPrompt: e.target.value, configSaved: false })} placeholder="在此输入包含 {{input}} 占位符的用户提示词..." />
+                    </div>
+                    
+                    {nodes.find(n => n.id === selectedNode.id)?.data.config?.configSaved && (
+                      <div style={{ fontSize: 12, color: '#16a34a', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: '6px 10px', display: 'flex', alignItems: 'center', gap: 4 }}>✅ 配置已保存</div>
+                    )}
+                    <button className="save-config-btn" onClick={() => {
+                      const nd = nodes.find(n => n.id === selectedNode.id)?.data;
+                      if (!nd?.config?.apiKey?.trim()) { setToastType('error'); setToastMessage('请填写 API 密钥'); setTimeout(() => setToastMessage(null), 3000); return; }
+                      if (!nd?.config?.apiEndpoint?.trim()) { setToastType('error'); setToastMessage('请填写接口地址'); setTimeout(() => setToastMessage(null), 3000); return; }
+                      updateNodeConfig(selectedNode.id, { configSaved: true });
+                      setToastType('success'); setToastMessage(`「${nd?.label ?? '模型'}」配置已保存`); setTimeout(() => setToastMessage(null), 3000);
+                    }}>保存配置</button>
+                  </>
+                  );
+                })()}
+
+                {/* ==== 音频节点 ==== */}
+                {selectedNode.type === 'audio' && (
+                  <>
+                    <div style={{ marginBottom: 12, fontWeight: 700, fontSize: 13, color: '#374151' }}>基本信息</div>
+                    <div className="config-section">
+                      <span className="config-label">API Key <span style={{fontSize: 11, color: '#9ca3af', fontWeight: 'normal', marginLeft: 6}}>(留空则使用系统默认 Key)</span></span>
+                      <input className="config-input" type="password" value={nodes.find(n => n.id === selectedNode.id)?.data.config?.apiKey ?? ''} onChange={(e) => updateNodeConfig(selectedNode.id, { apiKey: e.target.value, configSaved: false })} placeholder="sk-..." />
+                    </div>
+                    <div className="config-section">
+                      <span className="config-label">模型名称</span>
+                      <input className="config-input" value={nodes.find(n => n.id === selectedNode.id)?.data.config?.modelName ?? 'cosyvoice-v1'} onChange={(e) => updateNodeConfig(selectedNode.id, { modelName: e.target.value, configSaved: false })} placeholder="cosyvoice-v1" />
+                    </div>
+                    
+                    <div className="config-divider" />
+                    <div style={{ marginBottom: 12, fontWeight: 700, fontSize: 13, color: '#374151' }}>输入配置</div>
+                    <div className="config-section">
+                      <span className="config-label">待合成文本 (text)</span>
+                      <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+                        <select className="config-select" style={{ width: 80, flex: 'none' }} value={nodes.find(n => n.id === selectedNode.id)?.data.config?.textType ?? 'ref'} onChange={(e) => updateNodeConfig(selectedNode.id, { textType: e.target.value as 'input'|'ref', configSaved: false })}>
+                          <option value="input">输入</option>
+                          <option value="ref">引用</option>
+                        </select>
+                        {nodes.find(n => n.id === selectedNode.id)?.data.config?.textType === 'input' ? (
+                          <input className="config-input" style={{ flex: 1 }} placeholder="输入文本..." value={nodes.find(n => n.id === selectedNode.id)?.data.config?.textValue ?? ''} onChange={(e) => updateNodeConfig(selectedNode.id, { textValue: e.target.value, configSaved: false })} />
+                        ) : (
+                          <select className="config-select" style={{ flex: 1 }} value={nodes.find(n => n.id === selectedNode.id)?.data.config?.textValue ?? ''} onChange={(e) => updateNodeConfig(selectedNode.id, { textValue: e.target.value, configSaved: false })}>
+                            <option value="">选择引用...</option>
+                            <option value="input.user_input">用户输入.user_input</option>
+                            <option value="model.output">大模型.output</option>
+                          </select>
+                        )}
+                      </div>
+                    </div>
+                    <div className="config-section">
+                      <span className="config-label">音色 (voice)</span>
+                      <select className="config-select" value={nodes.find(n => n.id === selectedNode.id)?.data.config?.voice ?? 'longxiaochun'} onChange={(e) => updateNodeConfig(selectedNode.id, { voice: e.target.value, configSaved: false })}>
+                        <option value="longxiaochun">龙小淳 (longxiaochun)</option>
+                        <option value="longwan">龙婉 (longwan)</option>
+                        <option value="longcheng">龙橙 (longcheng)</option>
+                        <option value="longjian">龙健 (longjian)</option>
+                        <option value="longjielun">龙杰伦 (longjielun)</option>
+                      </select>
+                    </div>
+                    <div className="config-section">
+                      <span className="config-label">语言代码 (language_type)</span>
+                      <select className="config-select" value={nodes.find(n => n.id === selectedNode.id)?.data.config?.languageType ?? 'Auto'} onChange={(e) => updateNodeConfig(selectedNode.id, { languageType: e.target.value, configSaved: false })}>
+                        <option value="Auto">Auto</option>
+                      </select>
+                    </div>
+
+                    <div className="config-divider" />
+                    <div style={{ marginBottom: 12, fontWeight: 700, fontSize: 13, color: '#374151' }}>输出配置</div>
+                    <div className="config-section">
+                      <div style={{ padding: 10, border: '1px solid #f3f4f6', borderRadius: 8, background: '#f9fafb' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                          <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600 }}>变量名</span>
+                          <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#2563eb', background: '#eff6ff', padding: '2px 6px', borderRadius: 4 }}>voice_url</span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                          <span style={{ fontSize: 12, color: '#6b7280', fontWeight: 600 }}>变量类型</span>
+                          <span style={{ fontSize: 12, color: '#374151' }}>Audio URL</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {nodes.find(n => n.id === selectedNode.id)?.data.config?.configSaved && (
+                      <div style={{ fontSize: 12, color: '#16a34a', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, padding: '6px 10px', display: 'flex', alignItems: 'center', gap: 4 }}>✅ 配置已保存</div>
+                    )}
+                    <button className="save-config-btn" onClick={() => {
+                      const nd = nodes.find(n => n.id === selectedNode.id)?.data;
+                      if (nd?.config?.textType === 'input' && !nd?.config?.textValue?.trim()) { setToastType('error'); setToastMessage('请填写待合成文本'); setTimeout(() => setToastMessage(null), 3000); return; }
+                      if (nd?.config?.textType === 'ref' && !nd?.config?.textValue) { setToastType('error'); setToastMessage('请选择待合成文本的引用来源'); setTimeout(() => setToastMessage(null), 3000); return; }
+                      updateNodeConfig(selectedNode.id, { configSaved: true });
+                      setToastType('success'); setToastMessage(`「${nd?.label ?? '音频'}」配置已保存`); setTimeout(() => setToastMessage(null), 3000);
+                    }}>保存配置</button>
+                  </>
+                )}
+
+                {/* ==== 输出节点 ==== */}
+                {selectedNode.type === 'end' && (
+                  <>
+                    <div className="config-section">
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                        <span className="config-label" style={{ margin: 0 }}>输出配置</span>
+                        <button className="btn btn-primary btn-sm" onClick={() => addOutputParam(selectedNode.id)}>+ 添加</button>
+                      </div>
                       {(nodes.find(n => n.id === selectedNode.id)?.data.config?.outputParams ?? []).map((param, idx) => (
-                        <div key={idx} className="p-3 border border-gray-100 rounded-md bg-gray-50 space-y-2 relative group">
-                          <button 
-                            onClick={() => removeOutputParam(selectedNode.id, idx)}
-                            className="absolute top-2 right-2 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                          >
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                            </svg>
-                          </button>
-                          <div className="flex gap-2 pr-6">
-                            <input 
-                              placeholder="参数名"
-                              className="flex-1 min-w-0 p-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none"
-                              value={param.name}
-                              onChange={(e) => updateOutputParam(selectedNode.id, idx, { name: e.target.value })}
-                            />
-                            <select 
-                              className="p-1.5 text-xs border border-gray-300 rounded bg-white focus:ring-1 focus:ring-blue-500 outline-none w-20"
-                              value={param.type}
-                              onChange={(e) => updateOutputParam(selectedNode.id, idx, { type: e.target.value as 'input' | 'ref' })}
-                            >
+                        <div key={idx} style={{ padding: 10, border: '1px solid #f3f4f6', borderRadius: 8, marginBottom: 6, background: '#f9fafb', position: 'relative' }}>
+                          <button onClick={() => removeOutputParam(selectedNode.id, idx)} style={{ position: 'absolute', top: 6, right: 6, background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', fontSize: 14 }}>✕</button>
+                          <div style={{ display: 'flex', gap: 6, marginBottom: 6, paddingRight: 20 }}>
+                            <input className="config-input" style={{ flex: 1 }} placeholder="参数名" value={param.name} onChange={(e) => updateOutputParam(selectedNode.id, idx, { name: e.target.value })} />
+                            <select className="config-select" style={{ width: 72, flex: 'none' }} value={param.type} onChange={(e) => updateOutputParam(selectedNode.id, idx, { type: e.target.value as 'input'|'ref' })}>
                               <option value="input">输入</option>
                               <option value="ref">引用</option>
                             </select>
                           </div>
                           {param.type === 'input' ? (
-                            <input 
-                              placeholder="手动输入值..."
-                              className="w-full p-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 outline-none"
-                              value={param.value}
-                              onChange={(e) => updateOutputParam(selectedNode.id, idx, { value: e.target.value })}
-                            />
+                            <input className="config-input" placeholder="手动输入值..." value={param.value} onChange={(e) => updateOutputParam(selectedNode.id, idx, { value: e.target.value })} />
                           ) : (
-                            <select 
-                              className="w-full p-1.5 text-xs border border-gray-300 rounded bg-white focus:ring-1 focus:ring-blue-500 outline-none"
-                              value={param.value}
-                              onChange={(e) => updateOutputParam(selectedNode.id, idx, { value: e.target.value })}
-                            >
+                            <select className="config-select" value={param.value} onChange={(e) => updateOutputParam(selectedNode.id, idx, { value: e.target.value })}>
                               <option value="">选择引用变量...</option>
                               <option value="input.user_input">用户输入.user_input</option>
                               <option value="model.output">大模型.output</option>
-                              <option value="audio.url">音频合成.url</option>
+                              <option value="audio.url">超拟人音频合成.audioUrl</option>
                             </select>
                           )}
                         </div>
                       ))}
                       {(nodes.find(n => n.id === selectedNode.id)?.data.config?.outputParams?.length ?? 0) === 0 && (
-                        <p className="text-center py-4 text-xs text-gray-400 italic">暂无参数，点击添加按钮开始配置</p>
+                        <p style={{ textAlign: 'center', padding: '12px 0', fontSize: 12, color: '#9ca3af', fontStyle: 'italic' }}>暂无参数，点击添加</p>
                       )}
                     </div>
-                  </div>
+                    <div className="config-divider" />
+                    <div className="config-section">
+                      <span className="config-label">回答内容配置</span>
+                      <textarea className="config-textarea" rows={5} placeholder="输入回答内容，使用 {{参数名}} 引用参数" value={nodes.find(n => n.id === selectedNode.id)?.data.config?.answerContent ?? ''} onChange={(e) => updateNodeConfig(selectedNode.id, { answerContent: e.target.value })} />
+                      <p style={{ fontSize: 11, color: '#9ca3af', marginTop: 6 }}>💡 提示: 使用 {'{{参数名}}'} 引用上面定义的参数</p>
+                    </div>
+                    <button className="save-config-btn" onClick={() => {
+                      updateNodeConfig(selectedNode.id, { configSaved: true });
+                      setToastType('success'); setToastMessage('输出节点配置已保存'); setTimeout(() => setToastMessage(null), 3000);
+                    }}>保存配置</button>
+                  </>
+                )}
+              </>
+            ) : (
+              <div className="config-empty">
+                <div className="config-empty-icon">
+                  <svg style={{ width: 24, height: 24, color: '#9ca3af' }} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122" /></svg>
+                </div>
+                <p style={{ fontSize: 14, fontWeight: 600, color: '#6b7280', margin: '0 0 4px' }}>选择节点查看配置</p>
+                <p style={{ fontSize: 12, color: '#9ca3af', margin: 0 }}>点击画布中的节点</p>
+              </div>
+            )}
+          </div>
+        </aside>
+      </div>
 
-                  {/* 回答内容配置 */}
-                  <div className="pt-4 border-t border-gray-100">
-                    <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">回答内容配置</label>
-                    <textarea 
-                      className="w-full p-3 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all resize-none"
-                      rows={6}
-                      placeholder="输入回答内容，使用 {{参数名}} 引用上方配置的参数"
-                      value={nodes.find(n => n.id === selectedNode.id)?.data.config?.answerContent ?? ''}
-                      onChange={(e) => updateNodeConfig(selectedNode.id, { answerContent: e.target.value })}
-                    />
-                    <div className="mt-2">
-                      <p className="text-[10px] text-gray-400 mb-1">可用变量 (点击插入):</p>
-                      <div className="flex flex-wrap gap-1">
-                        {(nodes.find(n => n.id === selectedNode.id)?.data.config?.outputParams ?? [])
-                          .filter(p => p.name)
-                          .map((p, i) => (
-                            <button 
-                              key={i}
-                              onClick={() => {
-                                const currentNode = nodes.find(n => n.id === selectedNode.id);
-                                const current = currentNode?.data.config?.answerContent ?? '';
-                                updateNodeConfig(selectedNode.id, { answerContent: current + `{{${p.name}}}` });
-                              }}
-                              className="text-[10px] px-1.5 py-0.5 bg-blue-50 hover:bg-blue-100 border border-blue-100 rounded text-blue-600 font-mono transition-colors"
-                            >
-                              {p.name}
-                            </button>
-                          ))
-                        }
-                        {(nodes.find(n => n.id === selectedNode.id)?.data.config?.outputParams?.filter(p => p.name).length ?? 0) === 0 && (
-                          <span className="text-[10px] text-gray-300 italic">请先配置参数名</span>
-                        )}
-                      </div>
+      {/* ===== 调试弹窗 ===== */}
+      {debugOpen && (
+        <div className="debug-overlay" onClick={(e) => { 
+          if (e.target === e.currentTarget) {
+            setDebugOpen(false);
+            window.speechSynthesis?.cancel();
+            document.querySelectorAll('audio').forEach(a => a.pause());
+          } 
+        }}>
+          <div className="debug-modal">
+            <div className="debug-modal-header">
+              <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>⚙ 调试面板</h3>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                {/* 执行状态 badge */}
+                <span className={`debug-status-badge debug-status-${workflowStatus}`}>
+                  {workflowStatus === 'idle' ? '⏸ 空闲' : workflowStatus === 'running' ? '⏳ 执行中' : workflowStatus === 'success' ? '✅ 成功' : '❌ 失败'}
+                </span>
+                <button className="btn btn-sm" onClick={() => {
+                  setDebugOpen(false);
+                  window.speechSynthesis?.cancel();
+                  document.querySelectorAll('audio').forEach(a => a.pause());
+                }}>关闭</button>
+              </div>
+            </div>
+            
+            {/* 动态进度条 */}
+            {workflowStatus !== 'idle' && (
+              <div style={{ background: '#fff', borderBottom: '1px solid #f3f4f6' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 16px', fontSize: 11, color: '#6b7280', fontWeight: 600 }}>
+                  <span>执行进度</span>
+                  <span>{Math.round(Math.min(100, (completedNodesCount / nodes.length) * 100))}%</span>
+                </div>
+                <div style={{ height: 6, width: '100%', background: '#f3f4f6', position: 'relative', overflow: 'hidden' }}>
+                  <div 
+                    style={{ 
+                      height: '100%', 
+                      background: workflowStatus === 'error' ? '#ef4444' : 'linear-gradient(90deg, #3b82f6, #60a5fa)',
+                      width: `${Math.min(100, (completedNodesCount / nodes.length) * 100)}%`,
+                      transition: 'width 0.6s cubic-bezier(0.4, 0, 0.2, 1)',
+                    }} 
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="debug-modal-body custom-scrollbar">
+              {/* 输入区 */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#374151', marginBottom: 6 }}>输入文本</label>
+                <textarea className="config-textarea" rows={3} value={inputText} onChange={(e) => setInputText(e.target.value)} placeholder="请输入测试文本..." />
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+                <button className="btn btn-sm" style={{ flex: 1 }} onClick={async () => await saveInputText()} disabled={isLoading}>保存文本</button>
+                <button className="btn btn-primary btn-sm" style={{ flex: 2 }} onClick={async () => await testWorkflow()} disabled={isLoading}>
+                  {isLoading ? '⏳ 执行中...' : '▶ 测试工作流'}
+                </button>
+              </div>
+
+              {/* 节点执行结果卡片 */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+                {/* 大模型节点卡片 */}
+                <div className={`debug-node-card debug-node-${modelNodeDebug.status}`}>
+                  <div className="debug-node-header">
+                    <span style={{ fontWeight: 700 }}>🧠 大模型节点</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span className={`debug-status-badge debug-status-${modelNodeDebug.status}`} style={{ fontSize: 10, padding: '2px 6px' }}>
+                        {modelNodeDebug.status === 'idle' ? '待执行' : modelNodeDebug.status === 'running' ? '执行中' : modelNodeDebug.status === 'success' ? '成功' : '失败'}
+                      </span>
+                      {modelNodeDebug.durationMs > 0 && <span style={{ fontSize: 11, color: '#6b7280', fontFamily: 'monospace' }}>{modelNodeDebug.durationMs}ms</span>}
                     </div>
                   </div>
-                </>
-              ) : (
-                <div className="flex flex-col items-center justify-center py-10 text-gray-400">
-                  <svg className="w-12 h-12 mb-2 opacity-20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.756 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                  </svg>
-                  <p className="text-sm">该节点暂无高级配置项</p>
+                  <div className="debug-node-body">
+                    {modelNodeDebug.input && (
+                      <div className="debug-node-data-block">
+                        <div className="debug-node-data-label">📥 输入数据</div>
+                        <pre className="debug-node-data-pre">{modelNodeDebug.input.length > 300 ? modelNodeDebug.input.substring(0, 300) + '...' : modelNodeDebug.input}</pre>
+                      </div>
+                    )}
+                    {modelNodeDebug.output && (
+                      <div className="debug-node-data-block">
+                        <div className="debug-node-data-label">📤 输出数据</div>
+                        <pre className="debug-node-data-pre">{modelNodeDebug.output.length > 500 ? modelNodeDebug.output.substring(0, 500) + '...' : modelNodeDebug.output}</pre>
+                      </div>
+                    )}
+                    {modelNodeDebug.error && (
+                      <div className="debug-node-data-block debug-node-error">
+                        <div className="debug-node-data-label">⚠️ 错误信息</div>
+                        <pre className="debug-node-data-pre">{modelNodeDebug.error}</pre>
+                      </div>
+                    )}
+                    {modelNodeDebug.status === 'idle' && <div style={{ fontSize: 11, color: '#9ca3af', textAlign: 'center', padding: 12 }}>等待执行...</div>}
+                    {modelNodeDebug.status === 'running' && <div style={{ fontSize: 11, color: '#3b82f6', textAlign: 'center', padding: 12 }}>⏳ 正在调用大模型...</div>}
+                  </div>
+                </div>
+
+                {/* 超拟人音频节点卡片 */}
+                <div className={`debug-node-card debug-node-${audioNodeDebug.status}`}>
+                  <div className="debug-node-header">
+                    <span style={{ fontWeight: 700 }}>🎙 超拟人音频节点</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span className={`debug-status-badge debug-status-${audioNodeDebug.status}`} style={{ fontSize: 10, padding: '2px 6px' }}>
+                        {audioNodeDebug.status === 'idle' ? '待执行' : audioNodeDebug.status === 'running' ? '执行中' : audioNodeDebug.status === 'success' ? '成功' : '失败'}
+                      </span>
+                      {audioNodeDebug.durationMs > 0 && <span style={{ fontSize: 11, color: '#6b7280', fontFamily: 'monospace' }}>{audioNodeDebug.durationMs}ms</span>}
+                    </div>
+                  </div>
+                  <div className="debug-node-body">
+                    {audioNodeDebug.input && (
+                      <div className="debug-node-data-block">
+                        <div className="debug-node-data-label">📥 输入数据</div>
+                        <pre className="debug-node-data-pre">{audioNodeDebug.input.length > 300 ? audioNodeDebug.input.substring(0, 300) + '...' : audioNodeDebug.input}</pre>
+                      </div>
+                    )}
+                    {audioNodeDebug.output && (
+                      <div className="debug-node-data-block">
+                        <div className="debug-node-data-label">📤 输出数据</div>
+                        <pre className="debug-node-data-pre">{audioNodeDebug.output}</pre>
+                      </div>
+                    )}
+                    {audioNodeDebug.error && (
+                      <div className="debug-node-data-block debug-node-error">
+                        <div className="debug-node-data-label">⚠️ 错误信息</div>
+                        <pre className="debug-node-data-pre">{audioNodeDebug.error}</pre>
+                      </div>
+                    )}
+                    {audioNodeDebug.status === 'idle' && <div style={{ fontSize: 11, color: '#9ca3af', textAlign: 'center', padding: 12 }}>等待执行...</div>}
+                    {audioNodeDebug.status === 'running' && <div style={{ fontSize: 11, color: '#3b82f6', textAlign: 'center', padding: 12 }}>⏳ 正在合成音频...</div>}
+                  </div>
+                </div>
+              </div>
+
+              {/* 执行日志 & 最近输入 */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+                {/* 执行日志 */}
+                <div style={{ background: '#f9fafb', borderRadius: 10, padding: 12, border: '1px solid #f3f4f6', maxHeight: 200, overflowY: 'auto' }} className="custom-scrollbar">
+                  <h4 style={{ fontSize: 12, fontWeight: 700, color: '#6b7280', margin: '0 0 8px', display: 'flex', alignItems: 'center', gap: 4 }}>📋 执行日志</h4>
+                  {logs.length === 0 ? <p style={{ fontSize: 11, color: '#9ca3af' }}>暂无</p> : (
+                    <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>{logs.map((log, i) => (
+                      <li key={i} className="debug-log-entry">
+                        <span className="debug-log-time">{log.time}</span>
+                        <span className="debug-log-elapsed">+{log.elapsed}ms</span>
+                        <span className="debug-log-text">{log.text}</span>
+                      </li>
+                    ))}
+                    <div ref={logEndRef} />
+                  </ul>
+                  )}
+                </div>
+                {/* 最近输入 */}
+                <div style={{ background: '#f9fafb', borderRadius: 10, padding: 12, border: '1px solid #f3f4f6', maxHeight: 200, overflowY: 'auto' }} className="custom-scrollbar">
+                  <h4 style={{ fontSize: 12, fontWeight: 700, color: '#6b7280', margin: '0 0 8px' }}>📝 最近输入</h4>
+                  {recentInputs.length === 0 ? <p style={{ fontSize: 11, color: '#9ca3af' }}>暂无</p> : (
+                    <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>{recentInputs.map(r => (
+                      <li key={r.id} style={{ fontSize: 11, color: '#374151', padding: '3px 0', cursor: 'pointer' }} onClick={() => setInputText(r.inputText)}>{r.inputText}</li>
+                    ))}</ul>
+                  )}
+                </div>
+              </div>
+
+              {/* 音频输出 */}
+              {audioUrl && (
+                <div style={{ background: '#f9fafb', borderRadius: 10, padding: 14, border: '1px solid #f3f4f6' }}>
+                  <h4 style={{ fontSize: 12, fontWeight: 700, color: '#6b7280', margin: '0 0 8px' }}>🔊 音频输出</h4>
+                  {audioUrl.startsWith('tts://') ? (
+                    <div style={{ display: 'flex', alignItems: 'center', color: '#3b82f6', fontSize: 13 }}>🔊 正在通过语音引擎合成...</div>
+                  ) : (
+                    <audio controls style={{ width: '100%' }} src={audioUrl}>不支持音频播放</audio>
+                  )}
                 </div>
               )}
             </div>
           </div>
-        )}
-      </div>
-
-      {/* 调试抽屉 */}
-      {debugOpen && (
-        <div className="debug-drawer">
-          <div className="flex justify-between items-center mb-4 pb-4 border-b border-gray-100">
-            <h3 className="text-lg font-semibold text-gray-800">调试模式</h3>
-            <button 
-              className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-md transition-colors"
-              onClick={() => setDebugOpen(false)}
-            >
-              关闭
-            </button>
-          </div>
-
-          {/* 登录状态栏 */}
-          <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-md flex justify-between items-center">
-            <span className="text-sm text-green-700">已登录：{currentUser}</span>
-            <button
-              className="px-3 py-1 text-xs bg-white border border-green-300 rounded-md hover:bg-green-50 transition-colors"
-              onClick={async () => await logout()}
-            >
-              退出登录
-            </button>
-          </div>
-          
-          <div className="mb-4">
-            <label className="block mb-2 text-sm font-medium text-gray-700">输入文本：</label>
-            <textarea
-              className="w-full p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              rows={3}
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder="请输入测试文本..."
-            />
-          </div>
-          
-          <div className="flex gap-2">
-            <button
-              className="initial-action-btn w-1/3 px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-md transition-colors font-medium"
-              onClick={async () => await saveInputText()}
-              disabled={isLoading}
-            >
-              保存文本
-            </button>
-
-            <button 
-              className="initial-action-btn w-2/3 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors font-medium flex items-center justify-center"
-              onClick={async () => await testWorkflow()}
-              disabled={isLoading}
-            >
-              {isLoading ? (
-                <>
-                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  执行中...
-                </>
-              ) : (
-                '测试工作流'
-              )}
-            </button>
-          </div>
-
-          <div className="mt-4 bg-gray-50 border border-gray-200 rounded-md p-3 max-h-40 overflow-auto">
-            <h4 className="mb-2 text-sm font-medium text-gray-700">最近输入历史</h4>
-            {recentInputs.length === 0 ? (
-              <p className="text-xs text-gray-500">暂无历史记录</p>
-            ) : (
-              <ul className="text-xs text-gray-700 space-y-1">
-                {recentInputs.map((record) => (
-                  <li
-                    key={record.id}
-                    className="cursor-pointer hover:text-blue-600"
-                    onClick={() => setInputText(record.inputText)}
-                  >
-                    {record.inputText}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <div className="mt-4 bg-gray-50 border border-gray-200 rounded-md p-3 max-h-40 overflow-auto">
-            <h4 className="mb-2 text-sm font-medium text-gray-700">执行日志</h4>
-            {logs.length === 0 ? (
-              <p className="text-xs text-gray-500">暂无日志</p>
-            ) : (
-              <ul className="text-xs text-gray-700 space-y-1">
-                {logs.map((log, index) => (
-                  <li key={`${log}-${index}`}>{log}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-          
-          {audioUrl && (
-            <div className="audio-player mt-6 pt-4 border-t border-gray-100">
-              <h4 className="mb-3 text-sm font-medium text-gray-700">音频输出：</h4>
-              <div className="bg-gray-50 p-4 rounded-md">
-                {audioUrl.startsWith('tts://') ? (
-                  <div className="flex items-center text-blue-600 py-2">
-                    <svg className="animate-pulse mr-2 h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-                    </svg>
-                    <span className="text-sm font-medium">正在通过真人语音引擎合成...</span>
-                  </div>
-                ) : (
-                  <audio controls className="w-full" src={audioUrl}>
-                    您的浏览器不支持音频播放。
-                  </audio>
-                )}
-              </div>
-            </div>
-          )}
         </div>
       )}
 
-      {/* 调试抽屉切换按钮 */}
-      <button
-        className="fixed bottom-4 right-4 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md shadow-lg transition-colors font-medium"
-        onClick={() => setDebugOpen(!debugOpen)}
-      >
-        {debugOpen ? '关闭调试' : '开启调试'}
-      </button>
+      {/* Toast */}
+      {toastMessage && (
+        <div style={{
+          position: 'fixed', top: 20, left: '50%', transform: 'translateX(-50%)', zIndex: 200,
+          padding: '10px 20px', borderRadius: 12, fontSize: 13, fontWeight: 600,
+          display: 'flex', alignItems: 'center', gap: 6,
+          background: toastType === 'success' ? '#16a34a' : '#dc2626', color: '#fff',
+          boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+          animation: 'fadeInDown 0.3s ease-out',
+        }}>
+          {toastType === 'success' ? '✅' : '⚠️'} {toastMessage}
+        </div>
+      )}
     </div>
   );
 }

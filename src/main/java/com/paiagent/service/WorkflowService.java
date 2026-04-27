@@ -18,6 +18,9 @@ public class WorkflowService {
     @Autowired
     private AudioService audioService;
 
+    @Autowired
+    private MinioService minioService;
+
     // 执行工作流
     public WorkflowResult execute(Workflow workflow, Map<String, Object> inputData) throws Exception {
         return executeWithEvents(workflow, inputData, null);
@@ -37,6 +40,12 @@ public class WorkflowService {
 
             // 3. 执行节点
             Map<String, Object> context = new HashMap<>(inputData == null ? Map.of() : inputData);
+            
+            // 为了支持前端引用，将输入数据中的 inputText 映射到变量系统
+            if (context.containsKey("inputText")) {
+                context.put("input.user_input", context.get("inputText"));
+            }
+
             executeNodes(executionOrder, workflow, context, eventConsumer);
 
             // 4. 返回结果
@@ -134,6 +143,7 @@ public class WorkflowService {
             switch (node.getType()) {
                 case "input":
                     // 输入节点，已经在inputData中
+                    context.put("input.user_input", context.getOrDefault("inputText", ""));
                     emitEvent(eventConsumer, NodeExecutionEvent.completed(node.getId(), node.getType(), "输入节点就绪", Map.of(
                             "inputText", context.getOrDefault("inputText", "")
                     )));
@@ -145,7 +155,7 @@ public class WorkflowService {
                     )));
                     break;
                 case "audio":
-                    executeAudioNode(node, context);
+                    executeAudioNode(node, context, eventConsumer);
                     emitEvent(eventConsumer, NodeExecutionEvent.completed(node.getId(), node.getType(), "音频节点执行完成", Map.of(
                             "audioUrl", context.getOrDefault("audioUrl", "")
                     )));
@@ -162,17 +172,109 @@ public class WorkflowService {
     }
 
     // 执行大模型节点
+    @SuppressWarnings("unchecked")
     private void executeModelNode(Node node, Map<String, Object> context) throws Exception {
-        String prompt = (String) context.getOrDefault("inputText", "你好");
-        String result = modelService.callDefaultModel(prompt);
-        context.put("modelOutput", result);
+        // 尝试从节点的 data.config 中提取前端配置的参数
+        Map<String, Object> data = node.getData();
+        Map<String, Object> config = null;
+        if (data != null && data.get("config") instanceof Map) {
+            config = (Map<String, Object>) data.get("config");
+        }
+
+        // 解析输入引用
+        String inputRef = config != null ? (String) config.get("inputRef") : null;
+        String resolvedInput = "";
+        if (inputRef != null && !inputRef.isBlank()) {
+            resolvedInput = (String) context.getOrDefault(inputRef, "");
+            if (resolvedInput == null || resolvedInput.isBlank()) {
+                if ("input.user_input".equals(inputRef)) {
+                    resolvedInput = (String) context.getOrDefault("inputText", "你好");
+                }
+            }
+        } else {
+            resolvedInput = (String) context.getOrDefault("inputText", "你好");
+        }
+
+        // 解析用户提示词模板
+        String userPromptTemplate = config != null ? (String) config.get("userPrompt") : null;
+        String prompt = resolvedInput;
+        if (userPromptTemplate != null && !userPromptTemplate.isBlank()) {
+            prompt = userPromptTemplate.replace("{{input}}", resolvedInput != null ? resolvedInput : "");
+        }
+
+        String apiKey = config != null ? (String) config.get("apiKey") : null;
+
+        if (apiKey != null && !apiKey.isBlank()) {
+            // 前端配置了 API Key，使用节点配置直接调用真实 API
+            String apiEndpoint = (String) config.get("apiEndpoint");
+            String modelName = (String) config.get("modelName");
+            String systemPrompt = (String) config.get("systemPrompt");
+            double temperature = 0.7;
+            Object tempObj = config.get("temperature");
+            if (tempObj instanceof Number) {
+                temperature = ((Number) tempObj).doubleValue();
+            }
+
+            logger.info("使用节点配置调用大模型: endpoint={}, model={}", apiEndpoint, modelName);
+            String result = modelService.callModelWithConfig(apiEndpoint, apiKey, modelName, temperature, systemPrompt, prompt);
+            
+            logger.info("模型节点执行结果: {}", result);
+            
+            // 如果结果是一个 URL，则尝试转存到 MinIO
+            if (result != null && result.trim().startsWith("http") && !result.contains("mock")) {
+                String trimmedResult = result.trim();
+                logger.info("检测到潜在的远程 URL，尝试转存到 MinIO: {}", trimmedResult);
+                result = minioService.uploadFromUrl(trimmedResult);
+            }
+            
+            context.put("modelOutput", result);
+            context.put("model.output", result); // 为引用系统保存
+        } else {
+            // 无节点配置，走默认逻辑（可能是 mock）
+            String result = modelService.callDefaultModel(prompt);
+            context.put("modelOutput", result);
+            context.put("model.output", result); // 为引用系统保存
+        }
     }
 
     // 执行音频合成节点
-    private void executeAudioNode(Node node, Map<String, Object> context) throws Exception {
-        String text = (String) context.getOrDefault("modelOutput", context.getOrDefault("inputText", "你好"));
-        String audioUrl = audioService.synthesize(text);
+    @SuppressWarnings("unchecked")
+    private void executeAudioNode(Node node, Map<String, Object> context, Consumer<NodeExecutionEvent> eventConsumer) throws Exception {
+        // 尝试从节点的 data.config 中提取前端配置的参数
+        Map<String, Object> data = node.getData();
+        Map<String, Object> config = new HashMap<>();
+        if (data != null && data.get("config") instanceof Map) {
+            config = (Map<String, Object>) data.get("config");
+        }
+
+        // 1. 解析输入文本 (text)
+        String textType = (String) config.getOrDefault("textType", "ref");
+        String textValue = (String) config.getOrDefault("textValue", "model.output");
+        String resolvedText = "";
+
+        if ("input".equals(textType)) {
+            resolvedText = textValue;
+        } else {
+            // 引用模式
+            resolvedText = (String) context.getOrDefault(textValue, "");
+            if (resolvedText == null || resolvedText.isBlank()) {
+                // 如果没有找到引用，回退到默认逻辑
+                resolvedText = (String) context.getOrDefault("modelOutput", context.getOrDefault("inputText", "你好"));
+            }
+        }
+
+        // 2. 获取其他参数
+        String apiKey = (String) config.get("apiKey");
+        String modelName = (String) config.get("modelName");
+        String voice = (String) config.getOrDefault("voice", "longxiaochun");
+        String languageType = (String) config.getOrDefault("languageType", "Auto");
+
+        // 3. 调用合成服务，传入进度回调
+        String audioUrl = audioService.synthesizeWithConfig(apiKey, modelName, voice, languageType, resolvedText, (progressMsg) -> {
+            emitEvent(eventConsumer, NodeExecutionEvent.progress(node.getId(), node.getType(), progressMsg));
+        });
         context.put("audioUrl", audioUrl);
+        context.put("audio.url", audioUrl); // 为引用系统保存
     }
 
     private void emitEvent(Consumer<NodeExecutionEvent> eventConsumer, NodeExecutionEvent event) {
@@ -403,6 +505,18 @@ public class WorkflowService {
         public static NodeExecutionEvent started(String nodeId, String nodeType, String message) {
             NodeExecutionEvent event = new NodeExecutionEvent();
             event.eventType = "node_started";
+            event.nodeId = nodeId;
+            event.nodeType = nodeType;
+            event.message = message;
+            event.success = true;
+            event.timestamp = System.currentTimeMillis();
+            event.data = Map.of();
+            return event;
+        }
+
+        public static NodeExecutionEvent progress(String nodeId, String nodeType, String message) {
+            NodeExecutionEvent event = new NodeExecutionEvent();
+            event.eventType = "node_progress";
             event.nodeId = nodeId;
             event.nodeType = nodeType;
             event.message = message;

@@ -42,14 +42,14 @@ auth:
 # 大模型API配置
 model:
   mock:
-    enabled: true
+    enabled: TRUE
   default-vendor: openai
   openai:
     api-key: ${OPENAI_API_KEY:mock-openai-key}
   deepseek:
     api-key: ${DEEPSEEK_API_KEY:mock-deepseek-key}
   tongyi:
-    api-key: ${TONGYI_API_KEY:mock-tongyi-key}
+    api-key: ${TONGYI_API_KEY:sk-8c86fe89446848429434910a2fdb9d1a}
 
 # 音频合成API配置
 # TTS 使用阿里云 DashScope CosyVoice（与通义共享 API Key）
@@ -58,4 +58,11 @@ model:
 # 未设置时自动回退为浏览器内置语音引擎
 audio:
   mock:
-    enabled: true
+    enabled: false
+
+minio:
+  endpoint: http://127.0.0.1:9005
+  accessKey: admin123
+  secretKey: 12345678
+  bucketName: paiagent
+  publicUrl: http://127.0.0.1:9005
